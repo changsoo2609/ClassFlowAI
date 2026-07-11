@@ -1,0 +1,50 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Local Python environments and tooling caches
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# User configuration and secrets
+_runtime/config.json
+*.env
+.env.*
+
+# Runtime startup state and logs
+APP_STARTED.flag
+STARTUP_ERROR.log
+ClassFlowAI_startup.log
+**/APP_STARTED.flag
+**/STARTUP_ERROR.log
+**/ClassFlowAI_startup.log
+*.log
+
+# User captures and generated records
+captures/
+screenshots/
+outputs/
+records/
+workspace/
+**/captures/
+**/screenshots/
+**/outputs/
+**/records/
+capture_records.json
+events.json
+**/capture_records.json
+**/events.json
+
+# Generated export and distribution archives
+*.zip
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
