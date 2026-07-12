@@ -502,7 +502,7 @@ class ClassFlowAIApp:
         tk.Label(nav, textvariable=self.record_pos_var, font=("맑은 고딕", 10)).pack(side="left", padx=12)
         tk.Button(nav, text="다음 ▶", command=self.show_next_record).pack(side="left")
         tk.Button(nav, text="현재 삭제", command=self.delete_current_record).pack(side="right", padx=(6, 0))
-        tk.Button(nav, text="전체 초기화", command=self.reset_today).pack(side="right")
+        tk.Button(nav, text="수업 초기화", command=self.reset_today).pack(side="right")
 
         self.preview_label = tk.Label(left, text="아직 캡처가 없습니다.\nCtrl+Shift+S로 캡처하세요.\n휠클릭으로 OCR / CAP 모드를 전환할 수 있습니다.", bg="#f4f4f4")
         self.preview_label.pack(fill="both", expand=True)
@@ -1624,14 +1624,116 @@ class ClassFlowAIApp:
         self.set_status("현재 캡처 기록을 제외했습니다.")
 
     def reset_today(self):
-        if not messagebox.askyesno("기록 초기화", "현재 목록을 초기화할까요?\n원본 캡처 이미지는 삭제하지 않습니다."):
+        with self.lesson_switch_lock:
+            if self.pending_capture_updates > 0 or self.execution_started_at is not None:
+                messagebox.showwarning(
+                    "초기화 대기",
+                    "현재 캡처 또는 OCR/CAP 처리가 끝난 뒤 수업을 초기화하세요.",
+                )
+                return
+
+        delete_images = messagebox.askyesnocancel(
+            "현재 수업 초기화",
+            "현재 수업의 캡처 기록을 초기화합니다.\n\n"
+            "예: 기록과 원본 이미지를 함께 삭제 (복구할 수 없음)\n"
+            "아니요: 기록만 초기화하고 원본 이미지는 유지\n"
+            "취소: 초기화하지 않음",
+            icon="warning",
+        )
+        if delete_images is None:
             return
-        self.capture_records = []
+
+        try:
+            with self.lesson_switch_lock:
+                if self.pending_capture_updates > 0 or self.execution_started_at is not None:
+                    messagebox.showwarning(
+                        "초기화 대기",
+                        "현재 캡처 또는 OCR/CAP 처리가 끝난 뒤 수업을 초기화하세요.",
+                    )
+                    return
+                result = self._apply_current_lesson_reset(bool(delete_images))
+        except Exception as exc:
+            messagebox.showerror(
+                "현재 수업 초기화 실패",
+                f"현재 수업을 초기화할 수 없습니다.\n\n{exc}",
+            )
+            return
+
+        failed_paths = result["failed_paths"]
+        if failed_paths:
+            preview = "\n".join(str(path) for path in failed_paths[:5])
+            if len(failed_paths) > 5:
+                preview += f"\n외 {len(failed_paths) - 5}개"
+            messagebox.showwarning(
+                "일부 이미지 삭제 실패",
+                "현재 수업 기록은 초기화했지만 일부 원본 이미지를 삭제하지 못했습니다.\n"
+                "삭제되지 않은 이미지는 목록에서 제외된 상태로 유지됩니다.\n\n"
+                + preview,
+            )
+            self.set_status(
+                f"수업 기록 초기화 완료, 이미지 {result['deleted_count']}개 삭제, "
+                f"{len(failed_paths)}개 삭제 실패"
+            )
+        elif delete_images:
+            self.set_status(
+                f"현재 수업 기록과 원본 이미지 {result['deleted_count']}개를 삭제했습니다."
+            )
+        else:
+            self.set_status(
+                f"현재 수업 기록을 초기화했습니다. 원본 이미지 {result['retained_count']}개는 유지됩니다."
+            )
+
+    def _apply_current_lesson_reset(self, delete_images: bool) -> dict:
+        image_paths = self._capture_image_files()
+        deleted_count = 0
+        failed_paths: list[Path] = []
+
+        if delete_images:
+            for image_path in image_paths:
+                try:
+                    image_path.unlink(missing_ok=True)
+                    deleted_count += 1
+                except Exception:
+                    failed_paths.append(image_path)
+            retained_paths = failed_paths
+        else:
+            retained_paths = image_paths
+
+        reset_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.capture_records = [
+            {
+                "record_id": image_path.stem,
+                "image_path": str(image_path),
+                "status": "reset",
+                "deleted": True,
+                "reset_at": reset_at,
+            }
+            for image_path in retained_paths
+        ]
         self.current_record_index = -1
-        self.save_records()
+        self.current_preview = None
         self.rebuild_outputs_from_records()
         self.refresh_current_preview()
-        self.set_status("목록을 초기화했습니다. 원본 이미지는 유지됩니다.")
+        try:
+            append_event(
+                self.paths["events"],
+                {
+                    "type": "lesson_reset",
+                    "delete_images": bool(delete_images),
+                    "image_count": len(image_paths),
+                    "deleted_count": deleted_count,
+                    "retained_count": len(retained_paths),
+                    "delete_failed_count": len(failed_paths),
+                },
+            )
+        except Exception:
+            pass
+        return {
+            "image_count": len(image_paths),
+            "deleted_count": deleted_count,
+            "retained_count": len(retained_paths),
+            "failed_paths": failed_paths,
+        }
 
     def copy_text_to_clipboard(self, text: str) -> bool:
         try:
