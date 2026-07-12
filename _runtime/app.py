@@ -2248,7 +2248,7 @@ class ClassFlowAIApp:
 
     def open_study_cards_window(self):
         try:
-            open_study_card_review_window(self.root, self.workspace)
+            open_study_card_review_window(self.root, self.workspace, self.config)
             self.set_status("현재 수업의 학습카드 검토 창을 열었습니다.")
         except Exception as e:
             messagebox.showerror("학습카드 열기 실패", str(e))

@@ -36,8 +36,9 @@ def _parse_lines(value: str) -> list[str]:
 
 
 class StudyCardReviewWindow:
-    def __init__(self, parent, workspace):
+    def __init__(self, parent, workspace, config=None):
         self.workspace = Path(workspace)
+        self.config = dict(config or {})
         self.cards = load_local_cards(self.workspace)
         self.visible_indices = []
         self.selected_index = None
@@ -316,10 +317,10 @@ class StudyCardReviewWindow:
                 review_window.deiconify()
                 review_window.lift()
                 return
-            self.review_session = open_today_review_window(self.window, self.workspace)
+            self.review_session = open_today_review_window(self.window, self.workspace, self.config)
         except Exception as exc:
             messagebox.showerror("오늘의 복습 열기 실패", str(exc), parent=self.window)
 
 
-def open_study_card_review_window(parent, workspace):
-    return StudyCardReviewWindow(parent, workspace)
+def open_study_card_review_window(parent, workspace, config=None):
+    return StudyCardReviewWindow(parent, workspace, config)

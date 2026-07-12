@@ -1,4 +1,6 @@
 import copy
+import queue
+import threading
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -7,6 +9,12 @@ from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 
 from modules.study_card_importer import load_local_cards
+from modules.study_answer_evaluator import (
+    StudyAnswerEvaluationError,
+    append_answer_evaluation,
+    evaluate_study_answer,
+    evaluation_history_event,
+)
 from modules.study_review_scheduler import (
     append_review_history,
     get_due_cards,
@@ -34,9 +42,10 @@ def _lines(value) -> str:
 
 
 class StudyReviewWindow:
-    def __init__(self, parent, workspace):
+    def __init__(self, parent, workspace, config=None):
         self.parent = parent
         self.workspace = Path(workspace)
+        self.config = dict(config or {})
         self.cards = load_local_cards(self.workspace)
         self.review_state = load_review_state(self.workspace)
         self.due_cards = get_due_cards(self.cards, self.review_state)
@@ -44,6 +53,11 @@ class StudyReviewWindow:
         self.completed = 0
         self.rating_counts = {rating: 0 for rating in RATING_LABELS}
         self.answer_revealed = False
+        self.evaluation_running = False
+        self.evaluation_request_token = 0
+        self.current_evaluation = None
+        self.current_evaluation_at = None
+        self.evaluation_results = queue.Queue()
 
         if not self.due_cards:
             messagebox.showinfo("오늘의 복습", "오늘 예정된 복습을 모두 완료했습니다.", parent=parent)
@@ -92,8 +106,17 @@ class StudyReviewWindow:
         tk.Label(answer_box, textvariable=self.answer_hint_var, fg="#555555", anchor="w").pack(fill="x")
         self.answer_input = ScrolledText(answer_box, height=6, wrap="word")
         self.answer_input.pack(fill="x", pady=(5, 7))
-        self.check_button = tk.Button(answer_box, text="답 확인", command=self.reveal_answer, width=14)
-        self.check_button.pack(anchor="e")
+        answer_actions = tk.Frame(answer_box)
+        answer_actions.pack(fill="x")
+        self.ai_button = tk.Button(
+            answer_actions,
+            text="AI로 설명 점검 (실험)",
+            command=self.start_ai_evaluation,
+            width=21,
+        )
+        self.ai_button.pack(side="left")
+        self.check_button = tk.Button(answer_actions, text="답 확인", command=self.reveal_answer, width=14)
+        self.check_button.pack(side="right")
 
         self.result_frame = tk.LabelFrame(self.window, text="답 비교", padx=12, pady=8)
         self.user_answer_var = tk.StringVar()
@@ -122,12 +145,16 @@ class StudyReviewWindow:
             command=self.rewrite_feynman_answer,
         )
 
-        ratings = tk.LabelFrame(self.window, text="직접 평가", padx=12, pady=9)
-        ratings.pack(fill="x", padx=12, pady=(0, 12))
+        self.ai_frame = tk.LabelFrame(self.window, text="AI 설명 점검 · 실험 기능", padx=12, pady=8)
+        self.ai_result_text = ScrolledText(self.ai_frame, height=9, wrap="word", state="disabled")
+        self.ai_result_text.pack(fill="x")
+
+        self.ratings_frame = tk.LabelFrame(self.window, text="직접 평가", padx=12, pady=9)
+        self.ratings_frame.pack(fill="x", padx=12, pady=(0, 12))
         self.rating_buttons = {}
         for rating, label in RATING_LABELS.items():
             button = tk.Button(
-                ratings,
+                self.ratings_frame,
                 text=label,
                 command=lambda value=rating: self.rate_card(value),
                 state="disabled",
@@ -177,10 +204,16 @@ class StudyReviewWindow:
         self.answer_input.delete("1.0", "end")
         self.check_button.config(state="normal")
         self.result_frame.pack_forget()
+        self.ai_frame.pack_forget()
         self.rewrite_button.pack_forget()
         for button in self.rating_buttons.values():
             button.config(state="disabled")
         self.answer_revealed = False
+        self.evaluation_request_token += 1
+        self.evaluation_running = False
+        self.current_evaluation = None
+        self.current_evaluation_at = None
+        self.ai_button.config(state="normal", text="AI로 설명 점검 (실험)")
         self.answer_input.focus_set()
 
     def reveal_answer(self):
@@ -212,8 +245,100 @@ class StudyReviewWindow:
             button.config(state="disabled")
         self.answer_input.config(state="normal")
         self.check_button.config(state="normal")
+        self.ai_frame.pack_forget()
+        self.evaluation_request_token += 1
+        self.evaluation_running = False
+        self.ai_button.config(state="normal", text="AI로 설명 점검 (실험)")
+        self.current_evaluation = None
+        self.current_evaluation_at = None
         self.answer_revealed = False
         self.answer_input.focus_set()
+
+    def start_ai_evaluation(self):
+        if self.evaluation_running:
+            return
+        card = self._current_card()
+        if card is None:
+            return
+        user_answer = self.answer_input.get("1.0", "end").strip()
+        if not user_answer:
+            messagebox.showinfo("AI 설명 점검", "먼저 답변을 작성해 주세요.", parent=self.window)
+            return
+        self.evaluation_running = True
+        self.evaluation_request_token += 1
+        token = self.evaluation_request_token
+        card_id = str(card.get("card_id") or "")
+        self.ai_button.config(state="disabled", text="AI 평가 중...")
+
+        def worker():
+            try:
+                result = evaluate_study_answer(card, user_answer, self.config)
+                error = None
+            except StudyAnswerEvaluationError as exc:
+                result = None
+                error = exc.user_message
+            except Exception:
+                result = None
+                error = "AI 평가 중 오류가 발생했습니다. 직접 평가를 계속할 수 있습니다."
+            self.evaluation_results.put((token, card_id, user_answer, result, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.window.after(50, lambda: self._poll_ai_evaluation(token))
+
+    def _poll_ai_evaluation(self, token):
+        if token != self.evaluation_request_token:
+            return
+        while True:
+            try:
+                result = self.evaluation_results.get_nowait()
+            except queue.Empty:
+                if self.evaluation_running:
+                    self.window.after(100, lambda: self._poll_ai_evaluation(token))
+                return
+            if result[0] == token:
+                self._finish_ai_evaluation(*result)
+                return
+
+    def _finish_ai_evaluation(self, token, card_id, user_answer, result, error):
+        if token != self.evaluation_request_token:
+            return
+        self.evaluation_running = False
+        self.ai_button.config(state="normal", text="AI로 설명 점검 (실험)")
+        card = self._current_card()
+        if card is None or str(card.get("card_id") or "") != card_id:
+            return
+        current_answer = self.answer_input.get("1.0", "end").strip()
+        if current_answer != user_answer:
+            self.current_evaluation = None
+            messagebox.showinfo(
+                "AI 설명 점검",
+                "답변이 변경되어 이전 AI 평가 결과를 표시하지 않았습니다.",
+                parent=self.window,
+            )
+            return
+        if error:
+            self.current_evaluation = None
+            messagebox.showwarning("AI 설명 점검 실패", error, parent=self.window)
+            return
+        self.current_evaluation = result
+        self.current_evaluation_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        rating_label = RATING_LABELS.get(result.get("recommended_rating"), result.get("recommended_rating", ""))
+        display = "\n\n".join(
+            [
+                result.get("safety_notice") or "AI 평가는 참고 자료이며 최종 평가는 직접 선택하세요.",
+                f"잘 설명한 부분:\n{_lines(result.get('matched_points')) or '(없음)'}",
+                f"빠진 부분:\n{_lines(result.get('missing_points')) or '(없음)'}",
+                f"잘못 이해한 부분:\n{_lines(result.get('incorrect_points')) or '(없음)'}",
+                f"참고 피드백: {result.get('feedback') or '(없음)'}",
+                f"다시 설명할 때 생각할 질문: {result.get('retry_prompt') or '(없음)'}",
+                f"참고 추천: {rating_label} · 신뢰도: {result.get('confidence', '')} · 자동 반영되지 않습니다.",
+            ]
+        )
+        self.ai_result_text.config(state="normal")
+        self.ai_result_text.delete("1.0", "end")
+        self.ai_result_text.insert("1.0", display)
+        self.ai_result_text.config(state="disabled")
+        self.ai_frame.pack(fill="x", padx=12, pady=(0, 8), before=self.ratings_frame)
 
     def rate_card(self, rating):
         card = self._current_card()
@@ -241,6 +366,22 @@ class StudyReviewWindow:
                 pass
             messagebox.showerror("복습 저장 실패", str(exc), parent=self.window)
             return
+        evaluation_save_error = None
+        if self.current_evaluation is not None:
+            try:
+                evaluation_event = evaluation_history_event(
+                    card.get("card_id"),
+                    self.current_evaluation,
+                    rating,
+                    self.current_evaluation_at,
+                )
+                append_answer_evaluation(self.workspace, evaluation_event)
+            except Exception:
+                evaluation_save_error = "AI 평가 기록을 저장하지 못했지만 복습 평가는 정상 저장되었습니다."
+        if evaluation_save_error:
+            messagebox.showwarning("AI 평가 기록", evaluation_save_error, parent=self.window)
+        self.evaluation_request_token += 1
+        self.evaluation_running = False
         self.completed += 1
         self.rating_counts[rating] += 1
         self.current_index += 1
@@ -287,5 +428,5 @@ class StudyReviewWindow:
         self.window.destroy()
 
 
-def open_today_review_window(parent, workspace):
-    return StudyReviewWindow(parent, workspace)
+def open_today_review_window(parent, workspace, config=None):
+    return StudyReviewWindow(parent, workspace, config)
