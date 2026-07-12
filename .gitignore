@@ -38,6 +38,9 @@ capture_records.json
 events.json
 **/capture_records.json
 **/events.json
+**/lessons/
+**/.classflow_current_lesson.json
+**/state/lesson.json
 
 # Generated export and distribution archives
 *.zip
@@ -47,4 +50,3 @@ events.json
 Thumbs.db
 .idea/
 .vscode/
-

@@ -28,7 +28,17 @@ from modules.chatgpt_handoff_exporter import (
     export_chatgpt_handoff_zip,
     export_preview_html,
 )
-from modules.storage import append_event, ensure_workspace, get_default_workspace, timestamp_file
+from modules.storage import (
+    LESSONS_DIR_NAME,
+    append_event,
+    create_lesson_workspace,
+    ensure_workspace,
+    get_current_lesson,
+    get_default_workspace,
+    is_lesson_workspace,
+    set_current_lesson,
+    timestamp_file,
+)
 from modules.ocr_engine import extract_text_from_image
 from modules.nvidia_cap_reasoner import (
     analyze_capture_image,
@@ -363,7 +373,8 @@ class ClassFlowAIApp:
         self.config = load_config()
 
         workspace_dir = self.config.get("workspace_dir")
-        self.workspace = Path(workspace_dir) if workspace_dir else get_default_workspace(self.config.get("use_daily_folder", True))
+        self.storage_root = Path(workspace_dir) if workspace_dir else get_default_workspace(self.config.get("use_daily_folder", True))
+        self.workspace = get_current_lesson(self.storage_root)
         self.paths = ensure_workspace(self.workspace)
 
         self.running = True
@@ -390,6 +401,8 @@ class ClassFlowAIApp:
         self.execution_record = None
         self.execution_mode = ""
         self.execution_timer_job = None
+        self.pending_capture_updates = 0
+        self.lesson_switch_lock = threading.RLock()
 
         self.load_records()
 
@@ -423,8 +436,22 @@ class ClassFlowAIApp:
         self.counter_var = tk.StringVar()
         tk.Label(top, textvariable=self.counter_var, font=("맑은 고딕", 10)).pack(side="right")
 
-        self.workspace_var = tk.StringVar(value=f"저장 위치: {self.workspace}")
-        tk.Label(self.root, textvariable=self.workspace_var, anchor="w").pack(fill="x", padx=10)
+        lesson_row = tk.Frame(self.root)
+        lesson_row.pack(fill="x", padx=10)
+        self.workspace_var = tk.StringVar(value=self.lesson_location_text())
+        tk.Label(lesson_row, textvariable=self.workspace_var, anchor="w").pack(side="left", fill="x", expand=True)
+        tk.Button(
+            lesson_row,
+            text="새 수업 시작",
+            command=self.start_new_lesson,
+            width=13,
+        ).pack(side="right", padx=(6, 0))
+        tk.Button(
+            lesson_row,
+            text="이전 수업 열기",
+            command=self.open_previous_lesson,
+            width=13,
+        ).pack(side="right", padx=(6, 0))
 
         self.status_var = tk.StringVar()
         status_row = tk.Frame(self.root)
@@ -1259,6 +1286,139 @@ class ClassFlowAIApp:
     def set_status(self, text: str):
         self.status_var.set(f"상태: {text}")
 
+    def lesson_location_text(self) -> str:
+        try:
+            is_legacy_workspace = self.workspace.resolve() == self.storage_root.resolve()
+        except Exception:
+            is_legacy_workspace = self.workspace == self.storage_root
+        lesson_name = self.workspace.name or str(self.workspace)
+        if is_legacy_workspace:
+            lesson_name = f"{lesson_name} (기존 수업)"
+        return f"현재 수업: {lesson_name} | 저장 위치: {self.workspace}"
+
+    def lesson_switch_blocked(self) -> bool:
+        with self.lesson_switch_lock:
+            if self.pending_capture_updates > 0 or self.execution_started_at is not None:
+                messagebox.showwarning(
+                    "수업 전환 대기",
+                    "현재 캡처 또는 OCR/CAP 처리가 끝난 뒤 수업을 전환하세요.",
+                )
+                return True
+        return False
+
+    def activate_lesson(self, lesson_workspace: Path) -> bool:
+        lesson_workspace = Path(lesson_workspace).resolve()
+        with self.lesson_switch_lock:
+            if self.pending_capture_updates > 0 or self.execution_started_at is not None:
+                messagebox.showwarning(
+                    "수업 전환 대기",
+                    "현재 캡처 또는 OCR/CAP 처리가 끝난 뒤 수업을 전환하세요.",
+                )
+                return False
+            new_paths = ensure_workspace(lesson_workspace)
+            set_current_lesson(self.storage_root, lesson_workspace)
+            self.workspace = lesson_workspace
+            self.paths = new_paths
+            self.capture_records = []
+            self.current_record_index = -1
+            self.current_preview = None
+            self.processing_state = "일시정지" if self.paused else "대기"
+            self.load_records()
+
+        self.workspace_var.set(self.lesson_location_text())
+        self.refresh_current_preview()
+        self.update_mode_badge()
+        return True
+
+    def start_new_lesson(self):
+        if self.lesson_switch_blocked():
+            return
+        if not messagebox.askyesno(
+            "새 수업 시작",
+            "현재 수업의 기록과 원본 이미지는 그대로 보존됩니다.\n새 수업을 시작할까요?",
+        ):
+            return
+
+        previous_workspace = self.workspace
+        try:
+            with self.lesson_switch_lock:
+                if self.pending_capture_updates > 0 or self.execution_started_at is not None:
+                    messagebox.showwarning(
+                        "수업 전환 대기",
+                        "현재 캡처 또는 OCR/CAP 처리가 끝난 뒤 수업을 전환하세요.",
+                    )
+                    return
+                lesson_workspace = create_lesson_workspace(self.storage_root)
+                if not self.activate_lesson(lesson_workspace):
+                    return
+            append_event(
+                self.paths["events"],
+                {
+                    "type": "lesson_created",
+                    "workspace": str(lesson_workspace),
+                    "previous_workspace": str(previous_workspace),
+                },
+            )
+            self.set_status(f"새 수업을 시작했습니다: {lesson_workspace.name}")
+        except Exception as exc:
+            messagebox.showerror(
+                "새 수업 시작 실패",
+                f"새 수업 폴더를 만들 수 없습니다.\n\n{exc}",
+            )
+
+    def open_previous_lesson(self):
+        if self.lesson_switch_blocked():
+            return
+
+        lessons_root = self.storage_root / LESSONS_DIR_NAME
+        initial_dir = lessons_root if lessons_root.exists() else self.storage_root
+        selected = filedialog.askdirectory(
+            title="이전 수업 폴더 선택",
+            initialdir=str(initial_dir),
+            mustexist=True,
+        )
+        if not selected:
+            return
+
+        lesson_workspace = Path(selected)
+        if lesson_workspace.name.lower() in {"captures", "logs", "outputs", "state"}:
+            lesson_workspace = lesson_workspace.parent
+        lesson_workspace = lesson_workspace.resolve()
+
+        if not is_lesson_workspace(lesson_workspace):
+            messagebox.showwarning(
+                "수업 폴더 확인",
+                "선택한 폴더에서 ClassFlowAI 수업 기록을 찾을 수 없습니다.\n"
+                "captures 또는 state 폴더가 있는 수업 폴더를 선택하세요.",
+            )
+            return
+
+        try:
+            if lesson_workspace == self.workspace.resolve():
+                self.set_status("이미 열려 있는 수업입니다.")
+                return
+        except Exception:
+            pass
+
+        previous_workspace = self.workspace
+        try:
+            if not self.activate_lesson(lesson_workspace):
+                return
+            append_event(
+                self.paths["events"],
+                {
+                    "type": "lesson_opened",
+                    "workspace": str(lesson_workspace),
+                    "previous_workspace": str(previous_workspace),
+                },
+            )
+            self.set_status(f"이전 수업을 열었습니다: {lesson_workspace.name}")
+        except Exception as exc:
+            messagebox.showerror(
+                "이전 수업 열기 실패",
+                f"선택한 수업을 열 수 없습니다.\n\n{exc}",
+            )
+
     def load_records(self):
         records_path = self.paths.get("records")
         if records_path and records_path.exists():
@@ -1377,23 +1537,30 @@ class ClassFlowAIApp:
                 time.sleep(1.0)
 
     def handle_new_clipboard_image(self, image: Image.Image):
-        image_path = self.paths["captures"] / f"capture_{timestamp_file()}.png"
-        save_image(image, image_path)
-        record = self.add_capture_record(image_path)
-        self.processing_state = "캡처 완료"
-        append_event(self.paths["events"], {"type": "capture_saved", "path": str(image_path), "mode": self.capture_mode})
+        with self.lesson_switch_lock:
+            image_path = self.paths["captures"] / f"capture_{timestamp_file()}.png"
+            save_image(image, image_path)
+            record = self.add_capture_record(image_path)
+            self.processing_state = "캡처 완료"
+            append_event(self.paths["events"], {"type": "capture_saved", "path": str(image_path), "mode": self.capture_mode})
+            self.pending_capture_updates += 1
 
         def update_ui():
-            self.current_record_index = self.capture_records.index(record)
-            self.rebuild_outputs_from_records()
-            self.refresh_current_preview()
+            try:
+                with self.lesson_switch_lock:
+                    self.current_record_index = self.capture_records.index(record)
+                    self.rebuild_outputs_from_records()
+                    self.refresh_current_preview()
 
-            if str(record.get("mode") or "capture").lower() == "ocr":
-                self.set_status(f"OCR 시작: {image_path.name}")
-                self.run_ocr_for_record_async(record, auto_copy=True, force=True)
-            else:
-                self.set_status(f"CAP 이미지 분석 시작: {image_path.name}")
-                self.run_cap_reasoning_for_record_async(record, auto_copy=True, force=True)
+                    if str(record.get("mode") or "capture").lower() == "ocr":
+                        self.set_status(f"OCR 시작: {image_path.name}")
+                        self.run_ocr_for_record_async(record, auto_copy=True, force=True)
+                    else:
+                        self.set_status(f"CAP 이미지 분석 시작: {image_path.name}")
+                        self.run_cap_reasoning_for_record_async(record, auto_copy=True, force=True)
+            finally:
+                with self.lesson_switch_lock:
+                    self.pending_capture_updates = max(0, self.pending_capture_updates - 1)
 
         self.root.after(0, update_ui)
 
@@ -2502,6 +2669,27 @@ class ClassFlowAIApp:
                         or ""
                     )
 
+                requested_workspace_value = str(
+                    new_config.get("workspace_dir")
+                    or ""
+                ).strip()
+                requested_storage_root = (
+                    Path(requested_workspace_value)
+                    if requested_workspace_value
+                    else get_default_workspace(
+                        bool(new_config.get("use_daily_folder", True))
+                    )
+                )
+                try:
+                    storage_root_changed = (
+                        requested_storage_root.resolve()
+                        != self.storage_root.resolve()
+                    )
+                except Exception:
+                    storage_root_changed = requested_storage_root != self.storage_root
+                if storage_root_changed and self.lesson_switch_blocked():
+                    return
+
                 save_config(new_config)
                 self.config = load_config()
 
@@ -2510,7 +2698,7 @@ class ClassFlowAIApp:
                     or ""
                 ).strip()
 
-                self.workspace = (
+                updated_storage_root = (
                     Path(workspace_value)
                     if workspace_value
                     else get_default_workspace(
@@ -2522,13 +2710,20 @@ class ClassFlowAIApp:
                         )
                     )
                 )
-                self.paths = ensure_workspace(
-                    self.workspace
-                )
+                if storage_root_changed:
+                    self.storage_root = updated_storage_root
+                    self.workspace = get_current_lesson(
+                        self.storage_root
+                    )
+                    self.paths = ensure_workspace(
+                        self.workspace
+                    )
+                    self.load_records()
+                else:
+                    self.storage_root = updated_storage_root
                 self.workspace_var.set(
-                    f"저장 위치: {self.workspace}"
+                    self.lesson_location_text()
                 )
-                self.load_records()
 
                 try:
                     if self.global_keyboard_listener:

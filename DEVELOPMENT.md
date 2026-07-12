@@ -110,6 +110,7 @@ API 호출이 필요한 검사는 테스트용 개인 키로 수행하고 키와
 - `__pycache__/`와 `*.pyc`
 - 사용자 캡처 이미지 폴더
 - 사용자 기록 JSON과 이벤트 기록
+- 수업별 `lessons/` 폴더와 `.classflow_current_lesson.json` 포인터
 - 생성된 GPT 전달 ZIP 및 배포 ZIP
 
 커밋 전 확인:
@@ -153,4 +154,3 @@ git commit -m "chore: establish ClassFlowAI baseline"
 ```
 
 커밋 전에 `config.json`, 로그, 캡처, 기록 JSON과 ZIP이 staged 목록에 없는지 확인한다.
-
