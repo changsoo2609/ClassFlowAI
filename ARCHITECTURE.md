@@ -103,6 +103,19 @@ ClassFlowAI/
 - 이미지와 안내 문서를 모아 ChatGPT 전달용 ZIP 생성
 - 파일명 정규화와 내보내기용 임시 구조 관리
 
+### `modules/study_card_spec.py`
+
+- GPT 결과물의 `study_cards.json`과 `study_cards.md` 생성 규격 제공
+- 카드 유형, 정답 신뢰도와 근거 이미지 연결 원칙 정의
+
+### `modules/study_card_validator.py`
+
+- `study_cards.json` 최상위 구조와 카드 필드 검증
+- 허용된 유형, 정답 신뢰도, 검토 필요 상태와 난이도 검사
+- 근거 이미지 누락, 질문 길이, 선택지 수와 학습 단위 카드 수 경고
+- 정규화된 질문의 동일·유사 중복 카드 ID 보고
+- 입력 카드의 자동 수정·삭제 없이 검증 보고서만 반환
+
 ## 주요 데이터 흐름
 
 ### OCR 모드
@@ -141,6 +154,17 @@ Windows 캡처 도구
 → chatgpt_handoff_exporter.export_chatgpt_handoff_zip
 → 전달용 ZIP 생성
 ```
+
+### 학습카드 검증
+
+```text
+ChatGPT 결과의 study_cards.json과 images/
+→ study_card_validator.validate_study_cards_file
+→ 구조 오류·품질 경고·중복 카드 ID·통계 보고
+→ validate_study_cards.py에서 한국어 CLI 결과와 종료 코드 출력
+```
+
+검증기는 아직 메인 UI에 연결되지 않으며 카드 복습 화면도 제공하지 않는다.
 
 ## 설정과 사용자 데이터
 

@@ -95,6 +95,27 @@ py -3.12 -m unittest discover -s tests -p "test_model_connections.py" -v
 
 실제 OCR·CAP 기본 모델 연결 결과는 `MODEL_CONNECTION_TEST.md`에 기록한다.
 
+### 학습카드 검증기 검사
+
+모듈 import와 전체 표준 `unittest`를 실행한다.
+
+```powershell
+cd _runtime
+py -3.12 -c "import modules.study_card_validator; print('STUDY_CARD_VALIDATOR_IMPORT_OK')"
+py -3.12 -m unittest discover -s tests -p "test_*.py" -v
+```
+
+ChatGPT 결과물은 다음과 같이 검증한다.
+
+```powershell
+cd _runtime
+py -3.12 validate_study_cards.py "study_cards.json" --images-dir "images"
+```
+
+- 오류가 없으면 종료 코드 `0`
+- 구조 오류, JSON 파싱 실패 또는 파일 읽기 실패는 종료 코드 `1`
+- 경고와 중복 카드는 보고하지만 원본 JSON을 수정하지 않음
+
 ## 변경 후 기본 검증 순서
 
 1. 전체 Python 컴파일
@@ -107,6 +128,7 @@ py -3.12 -m unittest discover -s tests -p "test_model_connections.py" -v
 8. CAP 캡처 후 원본 이미지 클립보드 유지 확인
 9. CAP 결과 수동 복사 확인
 10. GPT 전달 ZIP 생성과 내부 구조 확인
+11. 전체 `unittest`와 학습카드 CLI 정상·오류 종료 코드 확인
 
 API 호출이 필요한 검사는 테스트용 개인 키로 수행하고 키와 사용자 설정 파일을 커밋하지 않는다.
 
