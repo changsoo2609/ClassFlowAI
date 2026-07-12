@@ -84,6 +84,17 @@ IMPORT_OK
 py -3.12 -c "import PIL, pynput, requests, tkinter; print('DEPENDENCIES_OK')"
 ```
 
+### 모델 오류·재시도 회귀 검사
+
+실제 API 키나 네트워크를 사용하지 않는다.
+
+```powershell
+cd _runtime
+py -3.12 -m unittest discover -s tests -p "test_model_connections.py" -v
+```
+
+실제 OCR·CAP 기본 모델 연결 결과는 `MODEL_CONNECTION_TEST.md`에 기록한다.
+
 ## 변경 후 기본 검증 순서
 
 1. 전체 Python 컴파일

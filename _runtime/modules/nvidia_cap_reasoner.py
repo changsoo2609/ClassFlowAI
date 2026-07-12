@@ -105,6 +105,21 @@ def build_cap_prompt(config: dict | None = None) -> str:
     return custom_prompt or DEFAULT_CAP_PROMPT
 
 
+def _cap_retry_count(config: dict) -> int:
+    raw_value = config.get("cap_reasoning_retry_count")
+    if raw_value is None or raw_value == "":
+        raw_value = 1
+    return max(0, min(int(raw_value), 3))
+
+
+def _apply_model_request_options(payload: dict, model: str) -> None:
+    # Qwen 3.5는 thinking 모드가 기본값이라 짧은 이미지 분석도 첫 응답이
+    # 오래 지연될 수 있다. ClassFlowAI는 최종 결과만 사용하므로 공식 API의
+    # thinking 비활성 옵션을 이 모델 계열에만 적용한다.
+    if str(model or "").strip().lower().startswith("qwen/qwen3.5-"):
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+
 DEFAULT_OCR_CORRECTION_PROMPT = """
 원본 이미지와 아래 OCR 결과를 직접 비교하여 OCR 오류만 수정하세요.
 
@@ -166,7 +181,7 @@ def correct_ocr_with_image(image_path: Path, ocr_text: str, config: dict) -> str
     api_base = str(config.get("cap_reasoning_api_base") or DEFAULT_CAP_API_BASE).strip()
     connect_timeout = int(config.get("cap_reasoning_connect_timeout_sec") or 15)
     read_timeout = int(config.get("cap_reasoning_timeout_sec") or 150)
-    retry_count = max(0, min(int(config.get("cap_reasoning_retry_count") or 1), 3))
+    retry_count = _cap_retry_count(config)
     max_tokens = min(int(config.get("cap_reasoning_max_tokens") or 4096), 3000)
 
     prompt = (
@@ -192,6 +207,7 @@ def correct_ocr_with_image(image_path: Path, ocr_text: str, config: dict) -> str
         "max_tokens": max_tokens,
         "stream": False,
     }
+    _apply_model_request_options(payload, model)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -277,7 +293,7 @@ def analyze_capture_image(image_path: Path, config: dict) -> str:
     api_base = str(config.get("cap_reasoning_api_base") or DEFAULT_CAP_API_BASE).strip()
     connect_timeout = int(config.get("cap_reasoning_connect_timeout_sec") or 15)
     read_timeout = int(config.get("cap_reasoning_timeout_sec") or 150)
-    retry_count = max(0, min(int(config.get("cap_reasoning_retry_count") or 1), 3))
+    retry_count = _cap_retry_count(config)
     max_tokens = int(config.get("cap_reasoning_max_tokens") or 4096)
 
     payload = {
@@ -299,6 +315,7 @@ def analyze_capture_image(image_path: Path, config: dict) -> str:
         "max_tokens": max_tokens,
         "stream": False,
     }
+    _apply_model_request_options(payload, model)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",

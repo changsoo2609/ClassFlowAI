@@ -89,6 +89,7 @@ ClassFlowAI/
 ### `modules/nvidia_cap_reasoner.py`
 
 - CAP 이미지 해석 프롬프트 구성
+- 현재 Qwen 3.5 모델에서 최종 결과 지연을 줄이기 위한 thinking 비활성 옵션 적용
 - 원본 이미지 기반 CAP 추론 API 호출
 - 원본 이미지와 기존 OCR을 이용한 OCR 보정
 - 모델 응답 정리와 사용자용 오류 메시지 반환
