@@ -128,6 +128,23 @@ py -3.12 -m unittest discover -s tests -p "test_study_card_importer.py" -v
 
 테스트는 정상 JSON·ZIP, 재가져오기, 사용자 수정 보존, 이미지 충돌, 참조되지 않은 이미지 미추출과 위험한 ZIP 경로 차단을 임시 작업공간에서 확인한다.
 
+### 오늘의 복습과 미니 상태창 종료 검사
+
+```powershell
+cd _runtime
+py -3.12 -c "import modules.study_review_scheduler; print('STUDY_REVIEW_SCHEDULER_IMPORT_OK')"
+py -3.12 -m unittest discover -s tests -p "test_study_review_scheduler.py" -v
+py -3.12 -m unittest discover -s tests -p "test_mini_widget_exit.py" -v
+```
+
+일정 테스트는 신규·기존 카드 주기, 최대 간격, 모름 횟수, 재가져오기 상태 보존과 손상 파일 처리를 확인한다. 미니 상태창 테스트는 네 표면의 우클릭 바인딩, 메뉴 항목, 종료 취소, 기존 종료 흐름 호출과 중복 호출 안전성을 UI 이벤트에서 분리해 확인한다.
+
+Windows 수동 검증에서는 미니 상태창의 빈 영역·색상 영역·두 라벨을 각각 우클릭하고 다음을 확인한다.
+
+1. `메인 창 열기`, 현재 상태에 맞는 감지 메뉴와 `프로그램 종료`가 표시되는지 확인
+2. 종료 확인창에서 취소한 뒤 프로그램과 감지 상태가 유지되는지 확인
+3. 다시 종료를 선택하고 확인해 메인 창, 미니 창과 전역 리스너가 정상 종료되는지 확인
+
 ## 변경 후 기본 검증 순서
 
 1. 전체 Python 컴파일
@@ -143,6 +160,8 @@ py -3.12 -m unittest discover -s tests -p "test_study_card_importer.py" -v
 11. 전체 `unittest`와 학습카드 CLI 정상·오류 종료 코드 확인
 12. 정상 JSON·ZIP 카드 가져오기, 중복 병합과 위험한 ZIP 경로 차단 확인
 13. 학습카드 창에서 필터·수정·승인·제외와 근거 이미지 열기 확인
+14. 오늘의 복습에서 답 확인 전후 표시, 네 가지 평가와 재실행 후 일정 유지 확인
+15. 미니 상태창 우클릭 메뉴, 종료 취소와 확인 동작 점검
 
 API 호출이 필요한 검사는 테스트용 개인 키로 수행하고 키와 사용자 설정 파일을 커밋하지 않는다.
 
@@ -158,7 +177,7 @@ API 호출이 필요한 검사는 테스트용 개인 키로 수행하고 키와
 - 사용자 캡처 이미지 폴더
 - 사용자 기록 JSON과 이벤트 기록
 - 수업별 `lessons/` 폴더와 `.classflow_current_lesson.json` 포인터
-- 수업 작업공간의 `study/` 카드, 가져오기 이력과 근거 이미지
+- 수업 작업공간의 `study/` 카드, 가져오기 이력, 근거 이미지와 복습 상태·이력
 - 생성된 GPT 전달 ZIP 및 배포 ZIP
 
 커밋 전 확인:

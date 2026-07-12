@@ -66,6 +66,27 @@ else:
 USER_CONFIG_PATH = USER_CONFIG_DIR / "settings.json"
 USER_SECRET_PATH = USER_CONFIG_DIR / "secrets.json"
 
+EXIT_CONFIRMATION_MESSAGE = (
+    "ClassFlowAI를 종료할까요?\n"
+    "현재 저장된 수업 기록과 이미지는 유지됩니다."
+)
+
+
+def confirm_application_exit(confirm_callback, close_callback) -> bool:
+    if not confirm_callback("프로그램 종료", EXIT_CONFIRMATION_MESSAGE):
+        return False
+    close_callback()
+    return True
+
+
+def bind_mini_widget_events(widgets, start_drag, drag, end_drag, open_main, open_menu) -> None:
+    for widget in widgets:
+        widget.bind("<ButtonPress-1>", start_drag)
+        widget.bind("<B1-Motion>", drag)
+        widget.bind("<ButtonRelease-1>", end_drag)
+        widget.bind("<Double-Button-1>", open_main)
+        widget.bind("<Button-3>", open_menu)
+
 
 def get_hidden_subprocess_kwargs() -> dict:
     if not sys.platform.startswith("win"):
@@ -384,6 +405,7 @@ class ClassFlowAIApp:
         self.paths = ensure_workspace(self.workspace)
 
         self.running = True
+        self.closing = False
         self.paused = bool(self.config.get("pause_on_start", False))
         self.capture_mode = str(self.config.get("capture_mode", "capture") or "capture").lower()
         if self.capture_mode not in {"capture", "ocr"}:
@@ -3413,28 +3435,19 @@ class ClassFlowAIApp:
                 pady=(1, 5),
             )
 
-            for widget in [
-                self.mini_status_window,
-                self.mini_frame,
-                self.mini_mode_label,
-                self.mini_state_label,
-            ]:
-                widget.bind(
-                    "<ButtonPress-1>",
-                    self.start_mini_drag,
-                )
-                widget.bind(
-                    "<B1-Motion>",
-                    self.drag_mini_status,
-                )
-                widget.bind(
-                    "<ButtonRelease-1>",
-                    self.end_mini_drag,
-                )
-                widget.bind(
-                    "<Double-Button-1>",
-                    self.restore_main_window,
-                )
+            bind_mini_widget_events(
+                [
+                    self.mini_status_window,
+                    self.mini_frame,
+                    self.mini_mode_label,
+                    self.mini_state_label,
+                ],
+                self.start_mini_drag,
+                self.drag_mini_status,
+                self.end_mini_drag,
+                self.restore_main_window,
+                self.show_mini_context_menu,
+            )
             self.update_mini_status()
         except Exception as e:
             append_event(self.paths["events"], {"type": "mini_create_failed", "error": str(e)})
@@ -3487,6 +3500,31 @@ class ClassFlowAIApp:
                 widget.config(bg=bg)
         except Exception:
             pass
+
+    def show_mini_context_menu(self, event):
+        try:
+            menu = tk.Menu(self.mini_status_window, tearoff=0)
+            self.mini_context_menu = menu
+            menu.add_command(label="메인 창 열기", command=self.restore_main_window)
+            menu.add_command(
+                label="감지 다시 시작" if self.paused else "감지 일시정지",
+                command=self.toggle_pause,
+            )
+            menu.add_separator()
+            menu.add_command(label="프로그램 종료", command=self.request_app_exit)
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+    def request_app_exit(self) -> bool:
+        return confirm_application_exit(
+            lambda title, message: messagebox.askyesno(title, message, parent=self.mini_status_window),
+            self.on_close,
+        )
 
 
     def start_mini_drag(self, event):
@@ -3698,6 +3736,9 @@ class ClassFlowAIApp:
             pass
 
     def on_close(self):
+        if self.closing:
+            return
+        self.closing = True
         self.running = False
         self.stop_execution_timer(save_result=False)
         try:
@@ -3707,7 +3748,10 @@ class ClassFlowAIApp:
                 self.global_mouse_listener.stop()
         except Exception:
             pass
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
 
 def _write_startup_ready_flag() -> Path:

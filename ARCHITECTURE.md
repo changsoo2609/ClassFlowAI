@@ -28,7 +28,9 @@ ClassFlowAI/
       ├─ study_card_spec.py
       ├─ study_card_validator.py
       ├─ study_card_importer.py
-      └─ study_card_review.py
+      ├─ study_card_review.py
+      ├─ study_review_scheduler.py
+      └─ study_review_window.py
 ```
 
 ## 실행 흐름
@@ -61,6 +63,8 @@ ClassFlowAI/
 - Windows 캡처 도구 실행 및 창 표시 상태 관리
 - HTML 흐름 미리보기, 캡처 폴더 열기, GPT 전달 ZIP 생성
 - 현재 수업의 학습카드 가져오기·검토 창 열기
+- 승인된 카드의 오늘 복습 화면과 복습 결과 저장
+- 미니 상태창 우클릭 메뉴와 확인 후 기존 종료 흐름 호출
 - 실행 시간과 상태 메시지 갱신
 - 정상 시작 플래그 및 시작 오류 기록
 
@@ -136,6 +140,20 @@ ClassFlowAI/
 - 승인, 제외, 검토 대기 전환과 근거 이미지 열기 제공
 - 삭제 대신 로컬 검토 상태를 저장해 원본 카드 정보 보존
 
+### `modules/study_review_scheduler.py`
+
+- 승인되고 제외되지 않은 카드 중 현재 시각에 복습할 카드 선택
+- 모름·어려움·보통·쉬움 평가에 따른 결정적 다음 복습일 계산
+- 카드별 `review_state.json` 원자적 저장과 `review_history.jsonl` 이력 추가
+- 카드 본문과 복습 상태를 카드 ID 기준으로 분리해 재가져오기에도 상태 보존
+
+### `modules/study_review_window.py`
+
+- 질문과 선택지를 먼저 보여주고 답 확인 전 정답 영역과 평가 버튼 숨김
+- 답 확인 뒤 사용자 답, 확인된 답, 핵심 요소, 설명, 근거와 신뢰도 표시
+- 파인만 카드의 설명 안내와 `내 설명 다시 작성` 제공
+- 평가 직후 상태와 이력을 저장하고 세션 완료 통계 표시
+
 ## 주요 데이터 흐름
 
 ### OCR 모드
@@ -184,9 +202,11 @@ ChatGPT 결과의 study_cards.json과 images/
 → 오류가 없고 경고를 사용자가 확인하면 study_card_importer로 가져오기
 → 현재 수업의 study/cards.json과 참조된 study/images/에 저장
 → 학습카드 창에서 수정·승인·제외
+→ 승인 카드 중 due_at이 지난 카드로 오늘의 복습 구성
+→ 사용자 평가 직후 review_state.json과 review_history.jsonl 저장
 ```
 
-검증기는 입력을 자동 수정하지 않는다. 학습카드 창은 가져오기와 사전 검토만 제공하며 복습 일정, 정답 채점과 AI 답변 평가는 아직 제공하지 않는다.
+검증기는 입력을 자동 수정하지 않는다. 복습 화면은 사용자가 답을 비교하고 난이도를 직접 고르며 AI 정답 채점이나 답변 평가는 아직 제공하지 않는다.
 
 ## 설정과 사용자 데이터
 
@@ -198,6 +218,8 @@ ChatGPT 결과의 study_cards.json과 images/
 - 작업 폴더의 JSON 기록: 캡처 순서, 처리 결과와 상태
 - 수업 폴더의 `study/cards.json`: 가져온 카드, 사용자 수정과 검토 상태
 - 수업 폴더의 `study/imports/`, `study/images/`: 가져오기 이력과 참조 근거 이미지
+- 수업 폴더의 `study/review_state.json`: 카드 ID별 다음 복습일, 간격과 누적 상태
+- 수업 폴더의 `study/review_history.jsonl`: 완료된 복습 평가와 사용자 답변 이력
 - 런타임 플래그와 로그: 시작 성공 또는 실패 확인용 파일
 
 위 파일은 소스가 아니며 사용자별 값이나 실행 결과를 포함하므로 Git에서 제외한다.

@@ -10,6 +10,7 @@ from modules.study_card_importer import (
     load_local_cards,
     save_local_cards,
 )
+from modules.study_review_window import open_today_review_window
 
 
 STATUS_LABELS = {
@@ -40,6 +41,7 @@ class StudyCardReviewWindow:
         self.cards = load_local_cards(self.workspace)
         self.visible_indices = []
         self.selected_index = None
+        self.review_session = None
 
         self.window = tk.Toplevel(parent)
         self.window.title("ClassFlowAI 학습카드")
@@ -52,6 +54,7 @@ class StudyCardReviewWindow:
         top = tk.Frame(self.window, padx=10, pady=8)
         top.pack(fill="x")
         tk.Button(top, text="카드 가져오기", command=self.import_cards, width=15).pack(side="left")
+        tk.Button(top, text="오늘의 복습", command=self.open_today_review, width=15).pack(side="left", padx=(6, 0))
 
         self.stats_var = tk.StringVar()
         tk.Label(top, textvariable=self.stats_var, anchor="w").pack(side="left", padx=16)
@@ -305,6 +308,17 @@ class StudyCardReviewWindow:
         if report.get("warnings"):
             summary.extend(["", "경고:", *[f"- {item}" for item in report["warnings"]]])
         messagebox.showinfo("카드 가져오기 완료", "\n".join(summary), parent=self.window)
+
+    def open_today_review(self):
+        try:
+            review_window = getattr(self.review_session, "window", None)
+            if review_window is not None and review_window.winfo_exists():
+                review_window.deiconify()
+                review_window.lift()
+                return
+            self.review_session = open_today_review_window(self.window, self.workspace)
+        except Exception as exc:
+            messagebox.showerror("오늘의 복습 열기 실패", str(exc), parent=self.window)
 
 
 def open_study_card_review_window(parent, workspace):
