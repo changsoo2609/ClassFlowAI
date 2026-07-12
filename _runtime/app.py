@@ -21,7 +21,12 @@ except Exception:
     pynput_keyboard = None
     pynput_mouse = None
 
-from modules.clipboard_watcher import get_clipboard_image, image_hash, save_image
+from modules.clipboard_watcher import (
+    copy_image_to_clipboard,
+    get_clipboard_image,
+    image_hash,
+    save_image,
+)
 from modules.chatgpt_handoff_exporter import (
     DEFAULT_PROMPT_TEMPLATE,
     build_capture_timeline_markdown,
@@ -766,6 +771,7 @@ class ClassFlowAIApp:
         record = self.get_current_record()
         refine_state = "disabled"
         refine_text = "OCR 보정 후 복사"
+        refine_command = self.refine_current_ocr_and_copy
         second_state = "disabled"
         second_text = "CAP 해석 복사"
         second_command = self.copy_current_cap_result
@@ -813,6 +819,11 @@ class ClassFlowAIApp:
                 else:
                     second_text = "OCR 보정 후 해석"
             else:
+                refine_text = "CAP 원본 이미지 복사"
+                refine_command = self.copy_current_cap_image
+                image_path = Path(str(record.get("image_path") or ""))
+                if image_path.exists():
+                    refine_state = "normal"
                 second_command = self.copy_current_cap_result
 
                 if status == "cap_running":
@@ -828,6 +839,7 @@ class ClassFlowAIApp:
             self.ocr_refine_button.config(
                 state=refine_state,
                 text=refine_text,
+                command=refine_command,
             )
             self.cap_copy_button.config(
                 state=second_state,
@@ -1142,6 +1154,50 @@ class ClassFlowAIApp:
             if copied
             else "CAP 해석 내용 복사에 실패했습니다."
         )
+
+
+    def copy_current_cap_image(self):
+        record = self.get_current_record()
+        if record is None:
+            self.set_status("복사할 CAP 원본 이미지가 없습니다.")
+            return
+        if str(record.get("mode") or "").lower() == "ocr":
+            self.set_status("CAP 모드로 생성된 캡처에서만 원본 이미지를 복사할 수 있습니다.")
+            return
+
+        image_path = Path(str(record.get("image_path") or ""))
+        if not image_path.exists():
+            messagebox.showwarning(
+                "CAP 원본 이미지 복사 불가",
+                f"원본 이미지 파일을 찾을 수 없습니다.\n\n{image_path}",
+            )
+            return
+
+        previous_hash = self.last_hash
+        try:
+            with Image.open(image_path) as image:
+                self.last_hash = image_hash(image.convert("RGB"))
+            copy_image_to_clipboard(image_path, owner_hwnd=self.root.winfo_id())
+        except Exception as exc:
+            self.last_hash = previous_hash
+            self.set_status("CAP 원본 이미지 복사에 실패했습니다.")
+            messagebox.showerror(
+                "CAP 원본 이미지 복사 실패",
+                f"원본 이미지를 클립보드에 복사할 수 없습니다.\n\n{exc}",
+            )
+            return
+
+        try:
+            append_event(
+                self.paths["events"],
+                {
+                    "type": "cap_image_copied",
+                    "path": str(image_path),
+                },
+            )
+        except Exception:
+            pass
+        self.set_status("CAP 원본 이미지를 클립보드에 다시 복사했습니다.")
 
 
     def refine_current_ocr_and_copy(self):

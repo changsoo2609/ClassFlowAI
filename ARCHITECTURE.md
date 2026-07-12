@@ -66,6 +66,7 @@ ClassFlowAI/
 ### `modules/clipboard_watcher.py`
 
 - Windows 클립보드에서 이미지 읽기
+- Pillow 이미지를 Windows CF_DIB 형식으로 변환해 클립보드에 쓰기
 - 이미지 해시 계산으로 중복 판별 지원
 - 캡처 이미지를 지정 경로에 저장
 
@@ -126,6 +127,7 @@ Windows 캡처 도구
 → nvidia_cap_reasoner.analyze_capture_image
 → CAP 결과 기록 및 화면 표시
 → 원본 이미지 클립보드 유지
+→ 필요 시 선택한 CAP 원본 이미지를 클립보드에 다시 복사
 → 사용자가 요청할 때만 해석 텍스트 복사
 ```
 
