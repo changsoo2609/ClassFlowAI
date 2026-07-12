@@ -116,6 +116,18 @@ py -3.12 validate_study_cards.py "study_cards.json" --images-dir "images"
 - 구조 오류, JSON 파싱 실패 또는 파일 읽기 실패는 종료 코드 `1`
 - 경고와 중복 카드는 보고하지만 원본 JSON을 수정하지 않음
 
+### 학습카드 가져오기 검사
+
+가져오기 모듈 import와 UI 없이 실행되는 병합·보안 테스트를 수행한다.
+
+```powershell
+cd _runtime
+py -3.12 -c "import modules.study_card_importer; print('STUDY_CARD_IMPORTER_IMPORT_OK')"
+py -3.12 -m unittest discover -s tests -p "test_study_card_importer.py" -v
+```
+
+테스트는 정상 JSON·ZIP, 재가져오기, 사용자 수정 보존, 이미지 충돌, 참조되지 않은 이미지 미추출과 위험한 ZIP 경로 차단을 임시 작업공간에서 확인한다.
+
 ## 변경 후 기본 검증 순서
 
 1. 전체 Python 컴파일
@@ -129,6 +141,8 @@ py -3.12 validate_study_cards.py "study_cards.json" --images-dir "images"
 9. CAP 결과 수동 복사 확인
 10. GPT 전달 ZIP 생성과 내부 구조 확인
 11. 전체 `unittest`와 학습카드 CLI 정상·오류 종료 코드 확인
+12. 정상 JSON·ZIP 카드 가져오기, 중복 병합과 위험한 ZIP 경로 차단 확인
+13. 학습카드 창에서 필터·수정·승인·제외와 근거 이미지 열기 확인
 
 API 호출이 필요한 검사는 테스트용 개인 키로 수행하고 키와 사용자 설정 파일을 커밋하지 않는다.
 
@@ -144,6 +158,7 @@ API 호출이 필요한 검사는 테스트용 개인 키로 수행하고 키와
 - 사용자 캡처 이미지 폴더
 - 사용자 기록 JSON과 이벤트 기록
 - 수업별 `lessons/` 폴더와 `.classflow_current_lesson.json` 포인터
+- 수업 작업공간의 `study/` 카드, 가져오기 이력과 근거 이미지
 - 생성된 GPT 전달 ZIP 및 배포 ZIP
 
 커밋 전 확인:

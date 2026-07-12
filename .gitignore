@@ -41,6 +41,7 @@ events.json
 **/lessons/
 **/.classflow_current_lesson.json
 **/state/lesson.json
+**/study/
 
 # Generated export and distribution archives
 *.zip

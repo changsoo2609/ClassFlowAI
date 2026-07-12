@@ -44,6 +44,7 @@ from modules.storage import (
     set_current_lesson,
     timestamp_file,
 )
+from modules.study_card_review import open_study_card_review_window
 from modules.ocr_engine import extract_text_from_image
 from modules.nvidia_cap_reasoner import (
     analyze_capture_image,
@@ -491,6 +492,7 @@ class ClassFlowAIApp:
         bottom.pack(side="bottom", fill="x", padx=10, pady=(4, 8))
         tk.Button(bottom, text="GPT ZIP파일 생성", command=self.export_chatgpt_handoff_zip_ui, width=20, height=2).pack(side="left", padx=(0, 6))
         tk.Button(bottom, text="HTML 흐름", command=self.open_html_flow_window, width=16, height=2).pack(side="left", padx=6)
+        tk.Button(bottom, text="학습카드", command=self.open_study_cards_window, width=14, height=2).pack(side="left", padx=6)
         tk.Button(bottom, text="설정", command=self.open_settings_window, width=12, height=2).pack(side="right")
         tk.Button(bottom, text="캡처 폴더 열기", command=self.open_capture_folder, width=16, height=2).pack(side="right", padx=(0, 6))
 
@@ -2221,6 +2223,13 @@ class ClassFlowAIApp:
                 webbrowser.open(preview_path.as_uri())
         except Exception as e:
             messagebox.showerror("HTML 흐름 오류", f"HTML 흐름을 여는 중 오류가 발생했습니다.\n\n{e}")
+
+    def open_study_cards_window(self):
+        try:
+            open_study_card_review_window(self.root, self.workspace)
+            self.set_status("현재 수업의 학습카드 검토 창을 열었습니다.")
+        except Exception as e:
+            messagebox.showerror("학습카드 열기 실패", str(e))
 
     def open_capture_folder(self):
         capture_dir = self.paths.get("captures")

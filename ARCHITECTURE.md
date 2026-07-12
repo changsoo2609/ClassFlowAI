@@ -24,7 +24,11 @@ ClassFlowAI/
       ├─ storage.py
       ├─ ocr_engine.py
       ├─ nvidia_cap_reasoner.py
-      └─ chatgpt_handoff_exporter.py
+      ├─ chatgpt_handoff_exporter.py
+      ├─ study_card_spec.py
+      ├─ study_card_validator.py
+      ├─ study_card_importer.py
+      └─ study_card_review.py
 ```
 
 ## 실행 흐름
@@ -56,6 +60,7 @@ ClassFlowAI/
 - 전역 키보드·마우스 단축키 감지
 - Windows 캡처 도구 실행 및 창 표시 상태 관리
 - HTML 흐름 미리보기, 캡처 폴더 열기, GPT 전달 ZIP 생성
+- 현재 수업의 학습카드 가져오기·검토 창 열기
 - 실행 시간과 상태 메시지 갱신
 - 정상 시작 플래그 및 시작 오류 기록
 
@@ -116,6 +121,21 @@ ClassFlowAI/
 - 정규화된 질문의 동일·유사 중복 카드 ID 보고
 - 입력 카드의 자동 수정·삭제 없이 검증 보고서만 반환
 
+### `modules/study_card_importer.py`
+
+- JSON 또는 ZIP의 카드를 기존 검증기로 먼저 검사
+- ZIP 전체를 풀지 않고 참조된 근거 이미지만 안전하게 저장
+- 동일 ID, 정규화된 질문·주제, 근거 이미지·카드 유형 순으로 중복 병합
+- 기존 사용자 수정과 검토 상태를 우선 보존하고 충돌 목록을 보고
+- 현재 수업의 `study/cards.json`, `study/imports/`, `study/images/` 관리
+
+### `modules/study_card_review.py`
+
+- 메인 창과 분리된 학습카드 가져오기·검토 창 제공
+- 상태·과목·카드 유형 필터와 카드 상세 편집 제공
+- 승인, 제외, 검토 대기 전환과 근거 이미지 열기 제공
+- 삭제 대신 로컬 검토 상태를 저장해 원본 카드 정보 보존
+
 ## 주요 데이터 흐름
 
 ### OCR 모드
@@ -155,16 +175,18 @@ Windows 캡처 도구
 → 전달용 ZIP 생성
 ```
 
-### 학습카드 검증
+### 학습카드 가져오기와 검토
 
 ```text
 ChatGPT 결과의 study_cards.json과 images/
 → study_card_validator.validate_study_cards_file
 → 구조 오류·품질 경고·중복 카드 ID·통계 보고
-→ validate_study_cards.py에서 한국어 CLI 결과와 종료 코드 출력
+→ 오류가 없고 경고를 사용자가 확인하면 study_card_importer로 가져오기
+→ 현재 수업의 study/cards.json과 참조된 study/images/에 저장
+→ 학습카드 창에서 수정·승인·제외
 ```
 
-검증기는 아직 메인 UI에 연결되지 않으며 카드 복습 화면도 제공하지 않는다.
+검증기는 입력을 자동 수정하지 않는다. 학습카드 창은 가져오기와 사전 검토만 제공하며 복습 일정, 정답 채점과 AI 답변 평가는 아직 제공하지 않는다.
 
 ## 설정과 사용자 데이터
 
@@ -174,6 +196,8 @@ ChatGPT 결과의 study_cards.json과 images/
 - 수업 폴더의 `state/lesson.json`: 새 수업 식별 정보
 - 작업 폴더의 캡처 이미지: 수업 중 생성된 사용자 자료
 - 작업 폴더의 JSON 기록: 캡처 순서, 처리 결과와 상태
+- 수업 폴더의 `study/cards.json`: 가져온 카드, 사용자 수정과 검토 상태
+- 수업 폴더의 `study/imports/`, `study/images/`: 가져오기 이력과 참조 근거 이미지
 - 런타임 플래그와 로그: 시작 성공 또는 실패 확인용 파일
 
 위 파일은 소스가 아니며 사용자별 값이나 실행 결과를 포함하므로 Git에서 제외한다.
