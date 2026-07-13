@@ -184,6 +184,14 @@ API 호출이 필요한 검사는 테스트용 개인 키로 수행하고 키와
 
 캡처 순서 저장은 `state/capture_records.json`의 각 record에 `display_order`를 기록하며 원자적 JSON 교체를 사용한다. 과거 record에 이 필드가 없거나 값이 중복·손상된 경우 `captured_at`, 기존 `created_at`, 파일명 순으로 안전하게 정규화한다. 원본 촬영 메타데이터와 이미지 파일은 정렬 기능에서 수정하지 않는다.
 
+## Windows용 Notion 패키지 호환성
+
+ClassFlowAI는 최종 `notion_paste_package.zip`을 직접 생성하지 않는다. GPT 전달 ZIP의 `PROMPT_FOR_CHATGPT.txt`와 `CAPTURE_FIRST_GUIDE.md`가 외부 GPT에 생성을 지시한다.
+
+최종 Notion ZIP의 루트 파일명은 `notion_ready.html`, `notion_ready.md`, `COPY_TO_NOTION.bat`, `copy_to_notion.py`, `README.txt`로 고정한다. 실행 관련 파일명은 ASCII 영문·숫자·밑줄만 사용하며 번역하거나 한글 이름으로 바꾸지 않는다. BAT는 `%~dp0`, Python은 `Path(__file__).resolve().parent`를 사용하므로 현재 작업 디렉터리나 사용자별 절대 경로에 의존하지 않아야 한다.
+
+BAT가 호출하는 `copy_to_notion.py`와 실제 ZIP 파일명이 일치하는지, CF_HTML 위치가 UTF-8 바이트 기준인지, 클립보드가 항상 닫히고 잠금 시 제한적으로 재시도하는지 확인한다. 공백과 한글이 포함된 상위 폴더에 GPT 전달 ZIP을 생성·해제하는 테스트를 유지하며, 실제 CMD·Notion 붙여넣기는 Windows 수동 검증 항목으로 남긴다.
+
 ## 사용자 데이터와 Git
 
 다음 파일과 폴더는 커밋하지 않는다.
