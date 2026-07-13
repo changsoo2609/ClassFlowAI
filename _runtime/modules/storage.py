@@ -72,7 +72,7 @@ def ensure_workspace(workspace: Path) -> dict[str, Path]:
     }
 
 
-def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(path.suffix + ".tmp")
     temp_path.write_text(
@@ -104,7 +104,7 @@ def is_lesson_workspace(workspace: Path) -> bool:
 def set_current_lesson(storage_root: Path, lesson_workspace: Path) -> None:
     storage_root = Path(storage_root).resolve()
     lesson_workspace = Path(lesson_workspace).resolve()
-    _write_json_atomic(
+    write_json_atomic(
         storage_root / CURRENT_LESSON_FILE_NAME,
         {
             "workspace": str(lesson_workspace),
@@ -145,7 +145,7 @@ def create_lesson_workspace(storage_root: Path) -> Path:
         suffix += 1
 
     paths = ensure_workspace(lesson_workspace)
-    _write_json_atomic(
+    write_json_atomic(
         lesson_metadata_path(lesson_workspace),
         {
             "lesson_id": lesson_workspace.name,

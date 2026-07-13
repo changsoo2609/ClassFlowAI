@@ -170,6 +170,9 @@ py -3.12 -m unittest discover -s tests -p "test_study_review_ai_ui.py" -v
 8. CAP 캡처 후 원본 이미지 클립보드 유지 확인
 9. CAP 결과 수동 복사 확인
 10. GPT 전달 ZIP 생성과 내부 구조 확인
+   - 캡처를 위·아래로 이동한 뒤 목록, HTML 흐름, ZIP 이미지 번호와 타임라인 순서가 일치하는지 확인
+   - 원래 촬영 순서 복원 취소/확인과 재실행 후 `display_order` 유지 확인
+   - 정렬 전후 이미지 파일명, `captured_at`/`created_at`, `record_id`와 OCR/CAP 결과가 동일한지 확인
 11. 전체 `unittest`와 학습카드 CLI 정상·오류 종료 코드 확인
 12. 정상 JSON·ZIP 카드 가져오기, 중복 병합과 위험한 ZIP 경로 차단 확인
 13. 학습카드 창에서 필터·수정·승인·제외와 근거 이미지 열기 확인
@@ -178,6 +181,8 @@ py -3.12 -m unittest discover -s tests -p "test_study_review_ai_ui.py" -v
 16. AI 답변 평가의 비동기 실행, 오류 복구와 추천 등급 미적용 확인
 
 API 호출이 필요한 검사는 테스트용 개인 키로 수행하고 키와 사용자 설정 파일을 커밋하지 않는다.
+
+캡처 순서 저장은 `state/capture_records.json`의 각 record에 `display_order`를 기록하며 원자적 JSON 교체를 사용한다. 과거 record에 이 필드가 없거나 값이 중복·손상된 경우 `captured_at`, 기존 `created_at`, 파일명 순으로 안전하게 정규화한다. 원본 촬영 메타데이터와 이미지 파일은 정렬 기능에서 수정하지 않는다.
 
 ## 사용자 데이터와 Git
 

@@ -33,6 +33,13 @@ from modules.chatgpt_handoff_exporter import (
     export_chatgpt_handoff_zip,
     export_preview_html,
 )
+from modules.capture_order import (
+    active_ordered_records,
+    move_record,
+    next_display_order,
+    normalize_display_orders,
+    restore_capture_order_if_confirmed,
+)
 from modules.storage import (
     LESSONS_DIR_NAME,
     append_event,
@@ -43,6 +50,7 @@ from modules.storage import (
     is_lesson_workspace,
     set_current_lesson,
     timestamp_file,
+    write_json_atomic,
 )
 from modules.study_card_review import open_study_card_review_window
 from modules.ocr_engine import extract_text_from_image
@@ -532,6 +540,31 @@ class ClassFlowAIApp:
         tk.Button(nav, text="다음 ▶", command=self.show_next_record).pack(side="left")
         tk.Button(nav, text="현재 삭제", command=self.delete_current_record).pack(side="right", padx=(6, 0))
         tk.Button(nav, text="수업 초기화", command=self.reset_today).pack(side="right")
+
+        order_box = tk.LabelFrame(left, text="현재 수업 캡처 목록", padx=6, pady=6)
+        order_box.pack(fill="x", pady=(0, 6))
+        list_row = tk.Frame(order_box)
+        list_row.pack(fill="x")
+        self.capture_listbox = tk.Listbox(
+            list_row,
+            height=5,
+            exportselection=False,
+            activestyle="dotbox",
+        )
+        self.capture_listbox.pack(side="left", fill="x", expand=True)
+        capture_scroll = tk.Scrollbar(
+            list_row,
+            orient="vertical",
+            command=self.capture_listbox.yview,
+        )
+        capture_scroll.pack(side="right", fill="y")
+        self.capture_listbox.config(yscrollcommand=capture_scroll.set)
+        self.capture_listbox.bind("<<ListboxSelect>>", self.select_capture_from_list)
+        order_actions = tk.Frame(order_box)
+        order_actions.pack(fill="x", pady=(6, 0))
+        tk.Button(order_actions, text="위로 이동", command=lambda: self.move_current_capture(-1)).pack(side="left")
+        tk.Button(order_actions, text="아래로 이동", command=lambda: self.move_current_capture(1)).pack(side="left", padx=(6, 0))
+        tk.Button(order_actions, text="원래 촬영 순서로 복원", command=self.confirm_restore_capture_order).pack(side="right")
 
         self.preview_label = tk.Label(left, text="아직 캡처가 없습니다.\nCtrl+Shift+S로 캡처하세요.\n휠클릭으로 OCR / CAP 모드를 전환할 수 있습니다.", bg="#f4f4f4")
         self.preview_label.pack(fill="both", expand=True)
@@ -1532,19 +1565,21 @@ class ClassFlowAIApp:
             try:
                 data = json.loads(records_path.read_text(encoding="utf-8"))
                 self.capture_records = data if isinstance(data, list) else []
+                self.capture_records = [record for record in self.capture_records if isinstance(record, dict)]
             except Exception:
                 self.capture_records = []
+        normalize_display_orders(self.capture_records)
         active = self.active_record_indices()
         self.current_record_index = active[-1] if active else -1
 
     def save_records(self):
         records_path = self.paths.get("records")
         if records_path:
-            records_path.parent.mkdir(parents=True, exist_ok=True)
-            records_path.write_text(json.dumps(self.capture_records, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_json_atomic(records_path, self.capture_records)
 
     def active_record_indices(self):
-        return [i for i, r in enumerate(self.capture_records) if not r.get("deleted") and Path(str(r.get("image_path") or "")).exists()]
+        indices_by_identity = {id(record): index for index, record in enumerate(self.capture_records)}
+        return [indices_by_identity[id(record)] for record in active_ordered_records(self.capture_records)]
 
     def get_current_record(self):
         if 0 <= self.current_record_index < len(self.capture_records):
@@ -1564,21 +1599,120 @@ class ClassFlowAIApp:
         pause_text = "일시정지" if self.paused else "감지 중"
         self.record_pos_var.set(self.active_position_text())
         self.counter_var.set(f"{self.active_position_text()} | 캡처 {active_count}개 | {pause_text}")
+        self.refresh_capture_list()
         self.update_mini_status()
 
     def add_capture_record(self, image_path: Path) -> dict:
+        captured_at = time.strftime("%Y-%m-%d %H:%M:%S")
         record = {
             "record_id": image_path.stem,
             "image_path": str(image_path),
             "status": "captured",
             "mode": self.capture_mode,
             "deleted": False,
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at": captured_at,
+            "captured_at": captured_at,
+            "display_order": next_display_order(self.capture_records),
         }
         self.capture_records.append(record)
         self.current_record_index = len(self.capture_records) - 1
         self.save_records()
         return record
+
+    def refresh_capture_list(self):
+        if not hasattr(self, "capture_listbox"):
+            return
+        selected_record = self.get_current_record()
+        try:
+            first_visible = self.capture_listbox.nearest(0)
+        except Exception:
+            first_visible = 0
+        active = self.active_record_indices()
+        self.capture_list_record_indices = active
+        self.capture_listbox.delete(0, tk.END)
+        selected_position = None
+        for position, record_index in enumerate(active):
+            record = self.capture_records[record_index]
+            image_name = Path(str(record.get("image_path") or "")).name
+            captured_at = str(record.get("captured_at") or record.get("created_at") or "시간 확인 필요")
+            self.capture_listbox.insert(tk.END, f"{position + 1}. {captured_at} · {image_name}")
+            if record is selected_record:
+                selected_position = position
+        if selected_position is not None:
+            self.capture_listbox.selection_set(selected_position)
+            self.capture_listbox.activate(selected_position)
+        if active:
+            self.capture_listbox.yview_moveto(min(first_visible, len(active) - 1) / max(len(active), 1))
+
+    def select_capture_from_list(self, _event=None):
+        if not hasattr(self, "capture_listbox"):
+            return
+        selection = self.capture_listbox.curselection()
+        if not selection:
+            return
+        position = int(selection[0])
+        indices = getattr(self, "capture_list_record_indices", [])
+        if 0 <= position < len(indices):
+            self.current_record_index = indices[position]
+            self.refresh_current_preview()
+
+    def move_current_capture(self, direction: int):
+        record = self.get_current_record()
+        if record is None:
+            self.set_status("순서를 변경할 캡처를 선택하세요.")
+            return
+        with self.lesson_switch_lock:
+            previous_orders = [item.get("display_order") for item in self.capture_records]
+            if not move_record(self.capture_records, record, direction):
+                self.set_status("이미 첫 항목입니다." if direction < 0 else "이미 마지막 항목입니다.")
+                return
+            try:
+                self.save_records()
+            except Exception as exc:
+                for item, previous in zip(self.capture_records, previous_orders):
+                    if previous is None:
+                        item.pop("display_order", None)
+                    else:
+                        item["display_order"] = previous
+                self.set_status("캡처 순서를 저장하지 못했습니다. 기존 순서를 유지합니다.")
+                messagebox.showerror("캡처 순서 저장 실패", f"정렬 정보를 저장할 수 없습니다.\n\n{exc}")
+                return
+        self.rebuild_outputs_from_records(save_records=False)
+        self.refresh_current_preview()
+        self.set_status("캡처 학습 흐름 순서를 변경했습니다.")
+
+    def confirm_restore_capture_order(self):
+        with self.lesson_switch_lock:
+            previous_orders = [item.get("display_order") for item in self.capture_records]
+            confirmed = False
+
+            def confirm():
+                nonlocal confirmed
+                confirmed = messagebox.askyesno(
+                    "원래 촬영 순서로 복원",
+                    "이미지는 삭제하지 않고 정렬 정보만 원래 촬영 순서로 되돌립니다.\n계속할까요?",
+                )
+                return confirmed
+
+            if not restore_capture_order_if_confirmed(self.capture_records, confirm):
+                if not confirmed:
+                    return
+                self.set_status("이미 원래 촬영 순서입니다.")
+                return
+            try:
+                self.save_records()
+            except Exception as exc:
+                for item, previous in zip(self.capture_records, previous_orders):
+                    if previous is None:
+                        item.pop("display_order", None)
+                    else:
+                        item["display_order"] = previous
+                self.set_status("촬영 순서 복원을 저장하지 못했습니다. 기존 순서를 유지합니다.")
+                messagebox.showerror("촬영 순서 복원 실패", f"정렬 정보를 저장할 수 없습니다.\n\n{exc}")
+                return
+        self.rebuild_outputs_from_records(save_records=False)
+        self.refresh_current_preview()
+        self.set_status("원래 촬영 순서로 복원했습니다. 이미지와 기록은 변경하지 않았습니다.")
 
     def _capture_image_files(self) -> list[Path]:
         exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
@@ -1607,10 +1741,11 @@ class ClassFlowAIApp:
         if added:
             self.save_records()
 
-    def rebuild_outputs_from_records(self):
-        self.save_records()
+    def rebuild_outputs_from_records(self, save_records: bool = True):
+        if save_records:
+            self.save_records()
         try:
-            active = [r for r in self.capture_records if not r.get("deleted") and Path(str(r.get("image_path") or "")).exists()]
+            active = active_ordered_records(self.capture_records)
             timeline_path = self.paths["outputs"] / "CAPTURE_TIMELINE.md"
             timeline_path.parent.mkdir(parents=True, exist_ok=True)
             timeline_path.write_text(build_capture_timeline_markdown(active, image_dir_name="../captures"), encoding="utf-8")
@@ -2223,7 +2358,7 @@ class ClassFlowAIApp:
         self._ensure_records_for_capture_files()
         self.rebuild_outputs_from_records()
 
-        active = [r for r in self.capture_records if not r.get("deleted") and Path(str(r.get("image_path") or "")).exists()]
+        active = active_ordered_records(self.capture_records)
         if not active:
             messagebox.showwarning("GPT ZIP파일 생성 불가", "전달할 캡처 파일이 없습니다. 먼저 캡처를 추가해 주세요.")
             return
@@ -2271,10 +2406,7 @@ class ClassFlowAIApp:
             return
 
         try:
-            active = [
-                r for r in self.capture_records
-                if not r.get("deleted") and Path(str(r.get("image_path") or "")).exists()
-            ]
+            active = active_ordered_records(self.capture_records)
             export_preview_html(active, preview_path)
             self.set_status(f"HTML 흐름 열기: {preview_path.name}")
             if sys.platform.startswith("win"):

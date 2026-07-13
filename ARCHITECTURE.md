@@ -2,7 +2,7 @@
 
 ## 목적
 
-ClassFlowAI는 Windows 화면 캡처를 시간순으로 저장하고, OCR 또는 이미지 추론 결과를 기록한 뒤 ChatGPT 전달용 ZIP으로 내보내는 Tkinter 데스크톱 프로그램이다.
+ClassFlowAI는 Windows 화면 캡처의 원본 촬영 정보를 보존하고, 별도의 사용자 학습 흐름 순서와 OCR 또는 이미지 추론 결과를 기록한 뒤 ChatGPT 전달용 ZIP으로 내보내는 Tkinter 데스크톱 프로그램이다.
 
 현재 구조는 `app.py`가 프로그램 전체 흐름을 조정하고, `_runtime/modules/`의 기능 모듈을 호출하는 형태다. 이 문서는 현재 기준 코드를 설명하며 구조 변경을 제안하거나 반영하지 않는다.
 
@@ -21,6 +21,7 @@ ClassFlowAI/
    ├─ install_classflow.ps1
    └─ modules/
       ├─ clipboard_watcher.py
+      ├─ capture_order.py
       ├─ storage.py
       ├─ ocr_engine.py
       ├─ nvidia_cap_reasoner.py
@@ -56,7 +57,7 @@ ClassFlowAI/
 - 새 수업 생성, 이전 수업 선택과 현재 수업 전환
 - OCR/CAP 모드와 실행 상태 관리
 - 클립보드 이미지 감시 및 새 캡처 등록
-- 시간순 캡처 레코드 로드·저장·탐색·삭제·초기화
+- 원본 촬영 정보와 분리된 사용자 순서로 캡처 레코드 로드·저장·탐색·삭제·초기화
 - 현재 수업 초기화 시 원본 이미지 유지·삭제 선택과 부분 삭제 실패 처리
 - OCR 실행, 보정, 내용 해석과 결과 복사 흐름 조정
 - CAP 이미지 추론과 수동 결과 복사 흐름 조정
@@ -86,7 +87,15 @@ ClassFlowAI/
 - 캡처·출력·기록용 폴더 구성 보장
 - 시간 기반 파일명과 표시 시간 생성
 - JSON Lines 형식 이벤트 기록 추가
+- 임시 파일과 `os.replace`를 이용한 JSON 원자적 저장
 - 알려진 불필요 산출물 정리
+
+### `modules/capture_order.py`
+
+- `display_order`가 없는 기존 기록을 촬영 시각 기준으로 호환 정렬
+- 중복·음수·비수치 순서 값 정규화
+- 활성 캡처의 사용자 순서 조회, 위·아래 이동과 촬영 순서 복원
+- 새 캡처가 현재 사용자 목록 마지막에 들어갈 순서 계산
 
 ### `modules/ocr_engine.py`
 
@@ -107,7 +116,7 @@ ClassFlowAI/
 
 ### `modules/chatgpt_handoff_exporter.py`
 
-- 활성 캡처의 시간순 Markdown 생성
+- 활성 캡처의 사용자 학습 흐름 순서 Markdown 생성
 - OCR/CAP 보조 결과 타임라인 생성
 - 이미지가 포함된 HTML 미리보기 생성
 - 이미지와 안내 문서를 모아 ChatGPT 전달용 ZIP 생성
@@ -195,7 +204,7 @@ Windows 캡처 도구
 ### GPT 전달 ZIP
 
 ```text
-활성 시간순 레코드와 원본 이미지
+활성 사용자 정렬 레코드와 원본 이미지(파일명·촬영 정보는 원본 유지)
 → OCR/CAP 보조 타임라인 재구성
 → 이미지 우선 해석 안내와 프롬프트 추가
 → chatgpt_handoff_exporter.export_chatgpt_handoff_zip
