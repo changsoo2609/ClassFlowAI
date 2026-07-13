@@ -80,6 +80,31 @@ EXIT_CONFIRMATION_MESSAGE = (
 )
 
 
+class GptZipNoCapturesError(Exception):
+    pass
+
+
+def gpt_zip_user_error_message(exc: Exception) -> str:
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) in {32, 33}:
+        reason = "ZIP 파일이 다른 프로그램에서 사용 중입니다."
+    elif isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
+        reason = "저장 공간이 부족합니다."
+    elif isinstance(exc, PermissionError):
+        reason = "출력 폴더에 파일을 저장할 권한이 없습니다."
+    elif isinstance(exc, FileNotFoundError):
+        reason = "일부 원본 이미지 파일을 찾을 수 없습니다."
+    elif isinstance(exc, (TypeError, ValueError, KeyError)):
+        reason = "캡처 기록 형식을 확인할 수 없습니다."
+    else:
+        reason = "예상하지 못한 내부 오류가 발생했습니다."
+    return (
+        "GPT 전달용 ZIP을 생성하지 못했습니다.\n"
+        "기존 수업 기록과 이미지는 변경되지 않았습니다.\n"
+        f"{reason}\n"
+        "로그를 확인한 후 다시 시도해 주세요."
+    )
+
+
 def confirm_application_exit(confirm_callback, close_callback) -> bool:
     if not confirm_callback("프로그램 종료", EXIT_CONFIRMATION_MESSAGE):
         return False
@@ -456,6 +481,8 @@ class ClassFlowAIApp:
         self.execution_timer_job = None
         self.pending_capture_updates = 0
         self.lesson_switch_lock = threading.RLock()
+        self.gpt_zip_generation_active = False
+        self.gpt_zip_previous_processing_state = self.processing_state
 
         self.load_records()
 
@@ -537,7 +564,14 @@ class ClassFlowAIApp:
 
         bottom = tk.Frame(self.root)
         bottom.pack(side="bottom", fill="x", padx=10, pady=(4, 8))
-        tk.Button(bottom, text="GPT ZIP파일 생성", command=self.export_chatgpt_handoff_zip_ui, width=20, height=2).pack(side="left", padx=(0, 6))
+        self.gpt_zip_button = tk.Button(
+            bottom,
+            text="GPT ZIP파일 생성",
+            command=self.export_chatgpt_handoff_zip_ui,
+            width=20,
+            height=2,
+        )
+        self.gpt_zip_button.pack(side="left", padx=(0, 6))
         tk.Button(bottom, text="HTML 흐름", command=self.open_html_flow_window, width=16, height=2).pack(side="left", padx=6)
         tk.Button(bottom, text="학습카드", command=self.open_study_cards_window, width=14, height=2).pack(side="left", padx=6)
         tk.Button(bottom, text="설정", command=self.open_settings_window, width=12, height=2).pack(side="right")
@@ -1473,6 +1507,12 @@ class ClassFlowAIApp:
         return f"현재 수업: {lesson_name} | 저장 위치: {self.workspace}"
 
     def lesson_switch_blocked(self) -> bool:
+        if self.gpt_zip_generation_active:
+            messagebox.showwarning(
+                "수업 전환 대기",
+                "GPT ZIP 생성이 끝난 뒤 수업을 전환하세요.",
+            )
+            return True
         with self.lesson_switch_lock:
             if self.pending_capture_updates > 0 or self.execution_started_at is not None:
                 messagebox.showwarning(
@@ -1484,6 +1524,8 @@ class ClassFlowAIApp:
 
     def activate_lesson(self, lesson_workspace: Path) -> bool:
         lesson_workspace = Path(lesson_workspace).resolve()
+        if self.gpt_zip_generation_active:
+            return False
         with self.lesson_switch_lock:
             if self.pending_capture_updates > 0 or self.execution_started_at is not None:
                 messagebox.showwarning(
@@ -1733,6 +1775,9 @@ class ClassFlowAIApp:
         return "break"
 
     def move_current_capture(self, direction: int):
+        if self.gpt_zip_generation_active:
+            self.set_status("GPT ZIP 생성이 끝난 뒤 캡처 순서를 변경하세요.")
+            return
         record = self.get_current_record()
         if record is None:
             self.set_status("순서를 변경할 캡처를 선택하세요.")
@@ -1758,6 +1803,9 @@ class ClassFlowAIApp:
         self.set_status("캡처 학습 흐름 순서를 변경했습니다.")
 
     def confirm_restore_capture_order(self):
+        if self.gpt_zip_generation_active:
+            self.set_status("GPT ZIP 생성이 끝난 뒤 촬영 순서를 복원하세요.")
+            return
         with self.lesson_switch_lock:
             previous_orders = [item.get("display_order") for item in self.capture_records]
             confirmed = False
@@ -1928,6 +1976,9 @@ class ClassFlowAIApp:
         self.refresh_current_preview()
 
     def delete_current_record(self):
+        if self.gpt_zip_generation_active:
+            self.set_status("GPT ZIP 생성이 끝난 뒤 캡처 기록을 제외하세요.")
+            return
         record = self.get_current_record()
         if record is None:
             return
@@ -1942,6 +1993,12 @@ class ClassFlowAIApp:
         self.set_status("현재 캡처 기록을 제외했습니다.")
 
     def reset_today(self):
+        if self.gpt_zip_generation_active:
+            messagebox.showwarning(
+                "초기화 대기",
+                "GPT ZIP 생성이 끝난 뒤 수업을 초기화하세요.",
+            )
+            return
         with self.lesson_switch_lock:
             if self.pending_capture_updates > 0 or self.execution_started_at is not None:
                 messagebox.showwarning(
@@ -2379,7 +2436,7 @@ class ClassFlowAIApp:
         except Exception as e:
             append_event(self.paths["events"], {"type": "ocr_timeline_write_failed", "error": str(e)})
 
-    def run_nvidia_ocr_for_zip(self, active: list[dict]) -> None:
+    def run_nvidia_ocr_for_zip(self, active: list[dict], progress_callback=None) -> None:
         """
         // 1. 설정의 NVIDIA API 키 확인하기
         // 2. OCR 결과가 없는 캡처만 API로 변환하기
@@ -2411,14 +2468,12 @@ class ClassFlowAIApp:
             image_path = Path(str(record.get("image_path") or ""))
             if not image_path.exists():
                 continue
-            self.processing_state = "OCR 처리 중"
-            self.update_mini_status()
-            self.set_status(f"OCR 처리 중: {idx}/{total} {image_path.name}")
-            self.root.update_idletasks()
+            if progress_callback:
+                progress_callback(f"GPT ZIP 생성 중 · OCR {idx}/{total}")
             ocr_text = extract_text_from_image(
                 image_path,
                 self.config,
-                on_retry=self._show_transient_retry_status,
+                on_retry=progress_callback,
             )
             record["ocr_text"] = ocr_text
             record["ocr_provider"] = str(self.config.get("nvidia_ocr_model") or "nvidia/nemotron-ocr-v2")
@@ -2427,45 +2482,180 @@ class ClassFlowAIApp:
 
         self.save_records()
         self.write_ocr_timeline(active)
-        self.processing_state = "OCR 완료"
-        self.update_mini_status()
 
     def export_chatgpt_handoff_zip_ui(self):
-        self._ensure_records_for_capture_files()
-        self.rebuild_outputs_from_records()
+        if self.gpt_zip_generation_active:
+            self.set_status("GPT ZIP을 이미 생성 중입니다.")
+            return
+        if self.pending_capture_updates > 0 or self.execution_started_at is not None:
+            self.set_status("현재 캡처 또는 OCR/CAP 처리가 끝난 뒤 GPT ZIP을 생성하세요.")
+            return
 
-        active = active_ordered_records(self.capture_records)
-        if not active:
-            messagebox.showwarning("GPT ZIP파일 생성 불가", "전달할 캡처 파일이 없습니다. 먼저 캡처를 추가해 주세요.")
+        self.gpt_zip_generation_active = True
+        self.gpt_zip_previous_processing_state = self.processing_state
+        self.processing_state = "GPT ZIP 생성 중"
+        try:
+            self.update_mini_status()
+            self.set_status("GPT 전달용 ZIP 생성 중...")
+            self.gpt_zip_button.config(state="disabled")
+            self.root.config(cursor="watch")
+        except Exception as exc:
+            detail = traceback.format_exc()
+            self._log_gpt_zip_failure(exc, detail)
+            self._finish_gpt_zip_generation(error=exc, detail=detail)
             return
 
         try:
-            self.run_nvidia_ocr_for_zip(active)
-            self.rebuild_outputs_from_records()
-            out_dir = self.paths["gpt_handoff"]
-            zip_path, prompt_text = export_chatgpt_handoff_zip(
-                active,
-                out_dir,
-                subject=str(self.config.get("html_flow_subject", "")),
-                prompt_template=str(self.config.get("html_flow_prompt_template", "")),
+            threading.Thread(target=self._gpt_zip_worker, daemon=True).start()
+        except Exception as exc:
+            detail = traceback.format_exc()
+            self._log_gpt_zip_failure(exc, detail)
+            self._finish_gpt_zip_generation(error=exc, detail=detail)
+
+    def _log_gpt_zip_failure(self, exc: Exception, detail: str):
+        try:
+            append_event(
+                self.paths["events"],
+                {
+                    "type": "gpt_zip_generation_failed",
+                    "error_type": type(exc).__name__,
+                    "traceback": detail,
+                },
             )
-            self.copy_text_to_clipboard(prompt_text)
-            self.processing_state = "대기"
+        except Exception:
+            pass
+
+    def _schedule_gpt_zip_ui(self, callback) -> bool:
+        if self.closing:
+            return False
+        try:
+            if not self.root.winfo_exists():
+                return False
+            self.root.after(0, callback)
+            return True
+        except Exception:
+            return False
+
+    def _report_gpt_zip_progress(self, text: str):
+        def update():
+            if not self.gpt_zip_generation_active or self.closing:
+                return
+            self.processing_state = "GPT ZIP 생성 중"
+            self.set_status(str(text or "GPT 전달용 ZIP 생성 중..."))
+            try:
+                self.update_mini_status()
+            except Exception:
+                pass
+
+        self._schedule_gpt_zip_ui(update)
+
+    def _gpt_zip_worker(self):
+        zip_path = None
+        prompt_text = ""
+        out_dir = None
+        error = None
+        detail = ""
+        try:
+            with self.lesson_switch_lock:
+                self._ensure_records_for_capture_files()
+                active = active_ordered_records(self.capture_records)
+                if not active:
+                    raise GptZipNoCapturesError("no active captures")
+                self.run_nvidia_ocr_for_zip(active, progress_callback=self._report_gpt_zip_progress)
+                self.rebuild_outputs_from_records()
+                out_dir = self.paths["gpt_handoff"]
+                zip_path, prompt_text = export_chatgpt_handoff_zip(
+                    active,
+                    out_dir,
+                    subject=str(self.config.get("html_flow_subject", "")),
+                    prompt_template=str(self.config.get("html_flow_prompt_template", "")),
+                )
+        except Exception as exc:
+            error = exc
+            detail = traceback.format_exc()
+            self._log_gpt_zip_failure(exc, detail)
+
+        scheduled = self._schedule_gpt_zip_ui(
+            lambda: self._finish_gpt_zip_generation(
+                zip_path=zip_path,
+                prompt_text=prompt_text,
+                out_dir=out_dir,
+                error=error,
+                detail=detail,
+            )
+        )
+        if not scheduled:
+            # 창이 이미 닫혔거나 Tk가 콜백을 받을 수 없는 경우에도 작업 플래그는 남기지 않는다.
+            self.gpt_zip_generation_active = False
+            self.processing_state = self.gpt_zip_previous_processing_state
+
+    def _restore_gpt_zip_ui_state(self):
+        self.gpt_zip_generation_active = False
+        self.processing_state = self.gpt_zip_previous_processing_state
+        try:
+            self.gpt_zip_button.config(state="normal")
+        except Exception:
+            pass
+        try:
+            self.root.config(cursor="")
+        except Exception:
+            pass
+        try:
             self.update_mini_status()
-            self.set_status(f"GPT ZIP파일 생성 완료: {zip_path.name}")
-            messagebox.showinfo(
-                "GPT ZIP파일 생성 완료",
-                "ZIP은 현재 캡처 파일 기준으로 생성되었습니다.\n"
-                "OCR 모드와 NVIDIA API 키가 있으면 OCR_TIMELINE도 함께 포함됩니다.\n"
-                "프롬프트는 클립보드에 복사되었습니다.\n\n"
-                "1. 열린 폴더의 ZIP 파일을 ChatGPT에 업로드\n"
-                "2. 입력창에 Ctrl+V\n\n"
-                f"{zip_path}",
+        except Exception:
+            pass
+
+    def _finish_gpt_zip_generation(
+        self,
+        *,
+        zip_path=None,
+        prompt_text: str = "",
+        out_dir=None,
+        error: Exception | None = None,
+        detail: str = "",
+    ):
+        self._restore_gpt_zip_ui_state()
+        if self.closing:
+            return
+
+        if isinstance(error, GptZipNoCapturesError):
+            self.set_status("GPT ZIP 생성 불가: 전달할 캡처가 없습니다.")
+            messagebox.showwarning(
+                "GPT ZIP파일 생성 불가",
+                "전달할 캡처 파일이 없습니다. 먼저 캡처를 추가해 주세요.",
             )
-            if sys.platform.startswith("win"):
+            return
+
+        if error is not None:
+            self.set_status("GPT ZIP 생성 실패. 로그를 확인한 후 다시 시도해 주세요.")
+            messagebox.showerror("GPT ZIP 생성 실패", gpt_zip_user_error_message(error))
+            return
+
+        copied = self.copy_text_to_clipboard(prompt_text)
+        self.set_status(
+            f"GPT ZIP파일 생성 완료: {Path(zip_path).name}"
+            if copied
+            else f"GPT ZIP파일 생성 완료: {Path(zip_path).name} · 프롬프트 복사 실패"
+        )
+        messagebox.showinfo(
+            "GPT ZIP파일 생성 완료",
+            "ZIP은 현재 캡처 파일 기준으로 생성되었습니다.\n"
+            "OCR 모드와 NVIDIA API 키가 있으면 OCR_TIMELINE도 함께 포함됩니다.\n"
+            "프롬프트는 클립보드에 복사되었습니다.\n\n"
+            "1. 열린 폴더의 ZIP 파일을 ChatGPT에 업로드\n"
+            "2. 입력창에 Ctrl+V",
+        )
+        if sys.platform.startswith("win") and out_dir is not None:
+            try:
                 os.startfile(out_dir)
-        except Exception as e:
-            messagebox.showerror("GPT ZIP파일 생성 실패", f"ZIP 생성 중 오류가 발생했습니다.\n\n{e}")
+            except Exception as exc:
+                try:
+                    append_event(
+                        self.paths["events"],
+                        {"type": "gpt_zip_folder_open_failed", "error_type": type(exc).__name__},
+                    )
+                except Exception:
+                    pass
 
     def open_html_flow_window(self):
         """
@@ -3731,9 +3921,9 @@ class ClassFlowAIApp:
             )
 
         self.mini_mode_var.set(
-            "OCR"
-            if self.capture_mode == "ocr"
-            else "CAP"
+            "ZIP"
+            if getattr(self, "gpt_zip_generation_active", False)
+            else ("OCR" if self.capture_mode == "ocr" else "CAP")
         )
         self.mini_state_var.set(state)
 

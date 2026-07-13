@@ -2,8 +2,10 @@ import base64
 import html
 import json
 import mimetypes
+import os
 import re
 import shutil
+import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -432,7 +434,7 @@ def _image_data_uri(path: Path) -> str:
     return f"data:{mime};base64,{data}"
 
 
-def build_preview_html(records: list[dict]) -> str:
+def build_preview_html(records: list[dict], image_dir_name: str | None = None) -> str:
     active = _active_records(records)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -518,9 +520,13 @@ ul {{ margin-top: 8px; }}
         parts.append('<div class="capture">')
         parts.append(f"<h3>{idx}. {html.escape(created_at)}</h3>")
         parts.append(f'<p class="meta">이미지: {html.escape(image_path.name)}</p>')
-        uri = _image_data_uri(image_path)
+        uri = (
+            f"{image_dir_name.rstrip('/')}/{image_path.name}"
+            if image_dir_name and image_path.exists()
+            else _image_data_uri(image_path)
+        )
         if uri:
-            parts.append(f'<p><img src="{uri}" alt="capture_{idx:03d}"></p>')
+            parts.append(f'<p><img src="{html.escape(uri)}" alt="capture_{idx:03d}"></p>')
         else:
             parts.append("<p>[이미지 없음]</p>")
         parts.append("</div>")
@@ -559,47 +565,54 @@ def export_chatgpt_handoff_zip(
 
     now = datetime.now()
     base_name = _safe_filename(f"ClassFlowAI_GPT_ZIP_{now.strftime('%Y%m%d_%H%M%S')}")
-    build_dir = out_dir / base_name
-    if build_dir.exists():
-        shutil.rmtree(build_dir)
-
-    images_dir = build_dir / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    active = _active_records(records)
-    timeline_records = []
-    for idx, record in enumerate(active, 1):
-        copied = dict(record)
-        image_path = Path(str(record.get("image_path") or ""))
-        if image_path.exists() and image_path.is_file():
-            suffix = image_path.suffix or ".png"
-            dest = images_dir / f"capture_{idx:03d}{suffix}"
-            shutil.copy2(image_path, dest)
-            copied["image_path"] = str(dest)
-            timeline_records.append(copied)
-
-    timeline_md = build_capture_timeline_markdown(timeline_records, image_dir_name="images")
     prompt_text = build_chatgpt_prompt(subject=subject, prompt_template=prompt_template)
+    zip_path = out_dir / f"{base_name}.zip"
+    build_dir = None
+    temp_zip_path = None
 
-    (build_dir / "CAPTURE_TIMELINE.md").write_text(timeline_md, encoding="utf-8")
-    if any(_clean_text(r.get("ocr_text") or "") or str(r.get("cap_text") or "").strip() for r in timeline_records):
-        (build_dir / "OCR_TIMELINE.md").write_text(build_ocr_timeline_markdown(timeline_records), encoding="utf-8")
-    (build_dir / "PROMPT_FOR_CHATGPT.txt").write_text(prompt_text, encoding="utf-8")
-    (build_dir / "CAPTURE_FIRST_GUIDE.md").write_text(CAPTURE_FIRST_GUIDE, encoding="utf-8")
-    (build_dir / "STUDY_CARD_SPEC.md").write_text(STUDY_CARD_SPEC, encoding="utf-8")
-    (build_dir / "html_flow_preview.html").write_text(build_preview_html(timeline_records), encoding="utf-8")
-    (build_dir / "README.txt").write_text(
-        "1. ChatGPT 새 대화에 이 ZIP을 업로드하세요.\n"
-        "2. PROMPT_FOR_CHATGPT.txt 내용은 앱에서 자동으로 클립보드에 복사됩니다.\n"
-        "3. 새 세션에서 다시 복사해야 하면 COPY_PROMPT_TO_CLIPBOARD.bat을 실행하세요.\n"
-        "4. html_flow_preview.html은 GPT 전달 전 스크린샷 순서 확인용입니다.\n"
-        "5. OCR_TIMELINE.md가 있으면 NVIDIA OCR 보조 텍스트입니다.\n"
-        "6. STUDY_CARD_SPEC.md는 수업·시험 문제에 공통으로 적용되는 학습카드 규격입니다.\n"
-        "7. ChatGPT 결과 ZIP에는 study_cards.json과 study_cards.md도 포함되어야 합니다.\n",
-        encoding="utf-8"
-    )
+    try:
+        build_dir = Path(tempfile.mkdtemp(prefix=f".{base_name}_", dir=out_dir))
+        fd, temp_zip_name = tempfile.mkstemp(prefix=f".{base_name}_", suffix=".zip.tmp", dir=out_dir)
+        temp_zip_path = Path(temp_zip_name)
+        os.close(fd)
+        images_dir = build_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
 
-    bat = """@echo off
+        active = _active_records(records)
+        timeline_records = []
+        for idx, record in enumerate(active, 1):
+            copied = dict(record)
+            image_path = Path(str(record.get("image_path") or ""))
+            if image_path.exists() and image_path.is_file():
+                suffix = image_path.suffix or ".png"
+                dest = images_dir / f"capture_{idx:03d}{suffix}"
+                shutil.copy2(image_path, dest)
+                copied["image_path"] = str(dest)
+                timeline_records.append(copied)
+
+        timeline_md = build_capture_timeline_markdown(timeline_records, image_dir_name="images")
+        (build_dir / "CAPTURE_TIMELINE.md").write_text(timeline_md, encoding="utf-8")
+        if any(_clean_text(r.get("ocr_text") or "") or str(r.get("cap_text") or "").strip() for r in timeline_records):
+            (build_dir / "OCR_TIMELINE.md").write_text(build_ocr_timeline_markdown(timeline_records), encoding="utf-8")
+        (build_dir / "PROMPT_FOR_CHATGPT.txt").write_text(prompt_text, encoding="utf-8")
+        (build_dir / "CAPTURE_FIRST_GUIDE.md").write_text(CAPTURE_FIRST_GUIDE, encoding="utf-8")
+        (build_dir / "STUDY_CARD_SPEC.md").write_text(STUDY_CARD_SPEC, encoding="utf-8")
+        (build_dir / "html_flow_preview.html").write_text(
+            build_preview_html(timeline_records, image_dir_name="images"),
+            encoding="utf-8",
+        )
+        (build_dir / "README.txt").write_text(
+            "1. ChatGPT 새 대화에 이 ZIP을 업로드하세요.\n"
+            "2. PROMPT_FOR_CHATGPT.txt 내용은 앱에서 자동으로 클립보드에 복사됩니다.\n"
+            "3. 새 세션에서 다시 복사해야 하면 COPY_PROMPT_TO_CLIPBOARD.bat을 실행하세요.\n"
+            "4. html_flow_preview.html은 GPT 전달 전 스크린샷 순서 확인용입니다.\n"
+            "5. OCR_TIMELINE.md가 있으면 NVIDIA OCR 보조 텍스트입니다.\n"
+            "6. STUDY_CARD_SPEC.md는 수업·시험 문제에 공통으로 적용되는 학습카드 규격입니다.\n"
+            "7. ChatGPT 결과 ZIP에는 study_cards.json과 study_cards.md도 포함되어야 합니다.\n",
+            encoding="utf-8"
+        )
+
+        bat = """@echo off
 chcp 65001 >nul
 title Copy ChatGPT Prompt
 
@@ -620,15 +633,27 @@ echo.
 pause
 exit /b 0
 """
-    (build_dir / "COPY_PROMPT_TO_CLIPBOARD.bat").write_text(bat, encoding="utf-8")
+        (build_dir / "COPY_PROMPT_TO_CLIPBOARD.bat").write_text(bat, encoding="utf-8")
 
-    zip_path = out_dir / f"{base_name}.zip"
-    if zip_path.exists():
-        zip_path.unlink()
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in build_dir.rglob("*"):
-            z.write(f, f.relative_to(build_dir))
-
-    shutil.rmtree(build_dir, ignore_errors=True)
+        with zipfile.ZipFile(temp_zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for file_path in build_dir.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                archive_name = file_path.relative_to(build_dir).as_posix()
+                if archive_name.startswith("/") or ".." in Path(archive_name).parts:
+                    raise ValueError("안전하지 않은 ZIP 내부 경로입니다.")
+                archive.write(file_path, archive_name)
+        with zipfile.ZipFile(temp_zip_path, "r") as archive:
+            broken_entry = archive.testzip()
+            if broken_entry is not None:
+                raise zipfile.BadZipFile(f"ZIP integrity check failed: {broken_entry}")
+        os.replace(temp_zip_path, zip_path)
+    finally:
+        if build_dir is not None:
+            shutil.rmtree(build_dir, ignore_errors=True)
+        if temp_zip_path is not None:
+            try:
+                temp_zip_path.unlink(missing_ok=True)
+            except Exception:
+                pass
     return zip_path, prompt_text
