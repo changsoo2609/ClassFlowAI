@@ -71,6 +71,17 @@ class NotionPackagePromptTests(unittest.TestCase):
         self.assertIn("CF_HTML", prompt)
         self.assertIn("finally", prompt)
 
+    def test_python_template_requires_64_bit_safe_win32_signatures(self):
+        prompt = build_chatgpt_prompt()
+        self.assertIn('ctypes.WinDLL("kernel32", use_last_error=True)', prompt)
+        self.assertIn("GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]", prompt)
+        self.assertIn("GlobalAlloc.restype = wintypes.HANDLE", prompt)
+        self.assertIn("GlobalLock.argtypes = [wintypes.HANDLE]", prompt)
+        self.assertIn("GlobalLock.restype = ctypes.c_void_p", prompt)
+        self.assertIn("SetClipboardData.restype = wintypes.HANDLE", prompt)
+        self.assertIn("GlobalLock failed", prompt)
+        self.assertIn("실패한 경우에만 `GlobalFree`", prompt)
+
     def test_custom_legacy_prompt_is_normalized_and_mandatory_rules_remain(self):
         prompt = build_chatgpt_prompt(
             prompt_template="Run COPY_TO_CLIPBOARD.bat and copy_to_clipboard.py"

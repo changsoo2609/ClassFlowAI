@@ -276,6 +276,36 @@ HTML_PATH = BASE_DIR / "notion_ready.html"
 MARKDOWN_PATH = BASE_DIR / "notion_ready.md"
 ```
 
+- 64비트 Windows에서 포인터가 잘리지 않도록 Win32 API의 `argtypes`와 `restype`를 반드시 명시하세요.
+- `ctypes.windll.kernel32.GlobalAlloc` 등을 반환형 선언 없이 직접 호출하지 마세요. 기본 `c_int` 반환형은 64비트 메모리 핸들을 잘라 `GlobalLock failed`를 일으킬 수 있습니다.
+- 최소한 아래 선언과 동등한 타입 구성을 그대로 사용하세요.
+
+```python
+import ctypes
+from ctypes import wintypes
+
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.restype = wintypes.HANDLE
+kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+kernel32.GlobalUnlock.restype = wintypes.BOOL
+kernel32.GlobalFree.argtypes = [wintypes.HANDLE]
+kernel32.GlobalFree.restype = wintypes.HANDLE
+
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.EmptyClipboard.argtypes = []
+user32.EmptyClipboard.restype = wintypes.BOOL
+user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+user32.SetClipboardData.restype = wintypes.HANDLE
+user32.CloseClipboard.argtypes = []
+user32.CloseClipboard.restype = wintypes.BOOL
+```
+
 - 현재 작업 디렉터리나 사용자별 절대 경로를 사용하지 마세요.
 - `notion_ready.html`을 UTF-8로 읽고 Windows `CF_HTML` 형식으로 저장하세요.
 - `StartHTML`, `EndHTML`, `StartFragment`, `EndFragment`는 UTF-8 바이트 위치로 계산하세요.
@@ -283,6 +313,7 @@ MARKDOWN_PATH = BASE_DIR / "notion_ready.md"
 - HTML 복사 실패 시 `notion_ready.md`를 Unicode 텍스트로 복사할 수 있게 하세요.
 - Windows 클립보드가 잠겨 있으면 짧은 간격으로 제한된 횟수만 재시도하세요.
 - 클립보드를 연 뒤에는 성공·실패와 관계없이 `finally`에서 반드시 닫으세요.
+- `SetClipboardData` 성공 후에는 메모리 핸들의 소유권이 Windows로 이전되므로 직접 해제하지 마세요. 실패한 경우에만 `GlobalFree`를 호출하세요.
 - 입력 파일 누락이나 클립보드 실패는 이해 가능한 오류를 출력하고 0이 아닌 exit code로 종료하세요.
 
 ### 생성 전 검증
