@@ -11,6 +11,8 @@ from PIL import Image, ImageGrab
 
 CF_DIB = 8
 GMEM_MOVEABLE = 0x0002
+CLIPBOARD_OPEN_ATTEMPTS = 10
+CLIPBOARD_RETRY_DELAY_SEC = 0.05
 
 
 def get_clipboard_image() -> Optional[Image.Image]:
@@ -56,6 +58,24 @@ def image_to_dib_bytes(image: Image.Image) -> bytes:
     return bmp[14:]
 
 
+def open_clipboard_with_retry(
+    open_clipboard,
+    owner_hwnd: int | None = None,
+    *,
+    max_attempts: int = CLIPBOARD_OPEN_ATTEMPTS,
+    retry_delay: float = CLIPBOARD_RETRY_DELAY_SEC,
+    sleep=None,
+) -> bool:
+    """Try to open the Windows clipboard for a short, bounded interval."""
+    sleep = sleep or time.sleep
+    for attempt in range(max(1, int(max_attempts))):
+        if open_clipboard(owner_hwnd):
+            return True
+        if attempt + 1 < max_attempts:
+            sleep(max(0.0, float(retry_delay)))
+    return False
+
+
 def _set_windows_clipboard_dib(dib_data: bytes, owner_hwnd: int | None = None) -> None:
     if not sys.platform.startswith("win"):
         raise OSError("이미지 클립보드 복사는 Windows에서만 지원됩니다.")
@@ -99,11 +119,10 @@ def _set_windows_clipboard_dib(dib_data: bytes, owner_hwnd: int | None = None) -
         finally:
             kernel32.GlobalUnlock(memory_handle)
 
-        for _ in range(10):
-            if user32.OpenClipboard(owner_hwnd):
-                clipboard_open = True
-                break
-            time.sleep(0.05)
+        clipboard_open = open_clipboard_with_retry(
+            user32.OpenClipboard,
+            owner_hwnd,
+        )
         if not clipboard_open:
             raise OSError(ctypes.get_last_error(), "Windows 클립보드를 열 수 없습니다.")
         if not user32.EmptyClipboard():

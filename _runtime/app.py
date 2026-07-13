@@ -96,6 +96,23 @@ def bind_mini_widget_events(widgets, start_drag, drag, end_drag, open_main, open
         widget.bind("<Button-3>", open_menu)
 
 
+def listbox_index_at_y(listbox, y: int) -> int | None:
+    """Return an item only when the pointer is inside its rendered row."""
+    try:
+        if int(listbox.size()) <= 0:
+            return None
+        index = int(listbox.nearest(y))
+        bbox = listbox.bbox(index)
+        if not bbox:
+            return None
+        _, row_y, _, row_height = bbox
+        if not (row_y <= y < row_y + row_height):
+            return None
+        return index
+    except Exception:
+        return None
+
+
 def get_hidden_subprocess_kwargs() -> dict:
     if not sys.platform.startswith("win"):
         return {}
@@ -560,6 +577,7 @@ class ClassFlowAIApp:
         capture_scroll.pack(side="right", fill="y")
         self.capture_listbox.config(yscrollcommand=capture_scroll.set)
         self.capture_listbox.bind("<<ListboxSelect>>", self.select_capture_from_list)
+        self.capture_listbox.bind("<Button-3>", self.show_capture_list_context_menu)
         order_actions = tk.Frame(order_box)
         order_actions.pack(fill="x", pady=(6, 0))
         tk.Button(order_actions, text="위로 이동", command=lambda: self.move_current_capture(-1)).pack(side="left")
@@ -568,6 +586,7 @@ class ClassFlowAIApp:
 
         self.preview_label = tk.Label(left, text="아직 캡처가 없습니다.\nCtrl+Shift+S로 캡처하세요.\n휠클릭으로 OCR / CAP 모드를 전환할 수 있습니다.", bg="#f4f4f4")
         self.preview_label.pack(fill="both", expand=True)
+        self.preview_label.bind("<Button-3>", self.show_capture_preview_context_menu)
 
         right = tk.LabelFrame(body, text="현재 결과", padx=8, pady=8)
         right.pack(side="right", fill="both", expand=True, padx=(6, 0))
@@ -1248,39 +1267,56 @@ class ClassFlowAIApp:
             self.set_status("CAP 모드로 생성된 캡처에서만 원본 이미지를 복사할 수 있습니다.")
             return
 
+        self.copy_record_original_image(record)
+
+    def copy_record_original_image(self, record: dict) -> bool:
+        """Copy an OCR or CAP record's original file without changing the record."""
+        if not isinstance(record, dict) or record.get("deleted"):
+            self.set_status("복사할 원본 이미지가 없습니다.")
+            messagebox.showwarning("원본 이미지 복사 불가", "선택한 캡처를 사용할 수 없습니다.")
+            return False
+
         image_path = Path(str(record.get("image_path") or ""))
-        if not image_path.exists():
+        if not image_path.is_file():
             messagebox.showwarning(
-                "CAP 원본 이미지 복사 불가",
-                f"원본 이미지 파일을 찾을 수 없습니다.\n\n{image_path}",
+                "원본 이미지 복사 불가",
+                "선택한 캡처의 원본 이미지 파일을 찾을 수 없습니다.",
             )
-            return
+            self.set_status("원본 이미지 파일을 찾을 수 없습니다.")
+            return False
 
         previous_hash = self.last_hash
         try:
             with Image.open(image_path) as image:
+                image.verify()
+            with Image.open(image_path) as image:
                 self.last_hash = image_hash(image.convert("RGB"))
             copy_image_to_clipboard(image_path, owner_hwnd=self.root.winfo_id())
-        except Exception as exc:
+        except Exception:
             self.last_hash = previous_hash
-            self.set_status("CAP 원본 이미지 복사에 실패했습니다.")
+            self.set_status("원본 이미지 복사에 실패했습니다.")
             messagebox.showerror(
-                "CAP 원본 이미지 복사 실패",
-                f"원본 이미지를 클립보드에 복사할 수 없습니다.\n\n{exc}",
+                "원본 이미지 복사 실패",
+                "원본 이미지를 클립보드에 복사할 수 없습니다. 잠시 후 다시 시도해 주세요.",
             )
-            return
+            return False
 
         try:
             append_event(
                 self.paths["events"],
                 {
-                    "type": "cap_image_copied",
+                    "type": (
+                        "cap_image_copied"
+                        if str(record.get("mode") or "").lower() != "ocr"
+                        else "capture_image_copied"
+                    ),
                     "path": str(image_path),
                 },
             )
         except Exception:
             pass
-        self.set_status("CAP 원본 이미지를 클립보드에 다시 복사했습니다.")
+        self.set_status("원본 이미지가 클립보드에 복사되었습니다.")
+        return True
 
 
     def refine_current_ocr_and_copy(self):
@@ -1655,6 +1691,46 @@ class ClassFlowAIApp:
         if 0 <= position < len(indices):
             self.current_record_index = indices[position]
             self.refresh_current_preview()
+
+    def show_capture_list_context_menu(self, event):
+        position = listbox_index_at_y(self.capture_listbox, int(event.y))
+        indices = getattr(self, "capture_list_record_indices", [])
+        if position is None or not (0 <= position < len(indices)):
+            return "break"
+        record_index = indices[position]
+        if not (0 <= record_index < len(self.capture_records)):
+            return "break"
+        record = self.capture_records[record_index]
+        if record.get("deleted"):
+            return "break"
+        self.current_record_index = record_index
+        self.capture_listbox.selection_clear(0, tk.END)
+        self.capture_listbox.selection_set(position)
+        self.capture_listbox.activate(position)
+        self.refresh_current_preview()
+        return self.show_capture_context_menu(event, record)
+
+    def show_capture_preview_context_menu(self, event):
+        record = self.get_current_record()
+        if record is None:
+            return "break"
+        return self.show_capture_context_menu(event, record)
+
+    def show_capture_context_menu(self, event, record: dict):
+        menu = tk.Menu(self.root, tearoff=0)
+        self.capture_context_menu = menu
+        menu.add_command(
+            label="원본 이미지 복사",
+            command=lambda selected=record: self.copy_record_original_image(selected),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+        return "break"
 
     def move_current_capture(self, direction: int):
         record = self.get_current_record()
