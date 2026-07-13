@@ -7,6 +7,8 @@ from pathlib import Path
 from PIL import Image
 
 from modules.chatgpt_handoff_exporter import (
+    NOTION_COPY_BAT_TEMPLATE,
+    NOTION_COPY_PYTHON_TEMPLATE,
     build_chatgpt_prompt,
     export_chatgpt_handoff_zip,
 )
@@ -81,6 +83,31 @@ class NotionPackagePromptTests(unittest.TestCase):
         self.assertIn("SetClipboardData.restype = wintypes.HANDLE", prompt)
         self.assertIn("GlobalLock failed", prompt)
         self.assertIn("실패한 경우에만 `GlobalFree`", prompt)
+
+    def test_prompt_embeds_canonical_bat_and_python_files_verbatim(self):
+        prompt = build_chatgpt_prompt()
+        self.assertIn(f"```bat\n{NOTION_COPY_BAT_TEMPLATE}\n```", prompt)
+        self.assertIn(f"```python\n{NOTION_COPY_PYTHON_TEMPLATE}\n```", prompt)
+        self.assertNotIn("ctypes.windll", NOTION_COPY_PYTHON_TEMPLATE)
+        self.assertIn("pause\nexit /b 0", NOTION_COPY_BAT_TEMPLATE)
+        compile(NOTION_COPY_PYTHON_TEMPLATE, "copy_to_notion.py", "exec")
+
+    def test_canonical_python_builds_utf8_cf_html_offsets(self):
+        namespace = {"__name__": "notion_template_test", "__file__": "copy_to_notion.py"}
+        exec(compile(NOTION_COPY_PYTHON_TEMPLATE, "copy_to_notion.py", "exec"), namespace)
+        payload = namespace["build_cf_html"]("<p>한글 본문</p>")
+        header, html_bytes = payload[:-1].split(b"<!--StartFragment-->", 1)
+        header_text = header.decode("ascii")
+        offsets = {
+            line.split(":", 1)[0]: int(line.split(":", 1)[1])
+            for line in header_text.splitlines()
+            if line.startswith(("StartHTML:", "EndHTML:", "StartFragment:", "EndFragment:"))
+        }
+        self.assertEqual(offsets["StartHTML"], len(header))
+        self.assertEqual(offsets["StartFragment"], len(header) + len(b"<!--StartFragment-->"))
+        self.assertGreater(offsets["EndFragment"], offsets["StartFragment"])
+        self.assertEqual(offsets["EndHTML"], len(payload) - 1)
+        self.assertIn("한글 본문".encode("utf-8"), html_bytes)
 
     def test_custom_legacy_prompt_is_normalized_and_mandatory_rules_remain(self):
         prompt = build_chatgpt_prompt(

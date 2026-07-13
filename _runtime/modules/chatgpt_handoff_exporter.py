@@ -214,7 +214,198 @@ notion_paste_package.zip
 - 중복 카드와 가치가 낮은 카드가 제거되었는가'''
 
 
-WINDOWS_SAFE_NOTION_PACKAGE_RULES = r'''
+NOTION_COPY_BAT_TEMPLATE = r'''@echo off
+setlocal
+chcp 65001 >nul
+cd /d "%~dp0"
+
+where py >nul 2>nul
+if errorlevel 1 goto use_python
+py -3 "%~dp0copy_to_notion.py"
+set "EXIT_CODE=%ERRORLEVEL%"
+goto finished
+
+:use_python
+where python >nul 2>nul
+if errorlevel 1 (
+    echo Python 3 was not found.
+    pause
+    exit /b 9009
+)
+python "%~dp0copy_to_notion.py"
+set "EXIT_CODE=%ERRORLEVEL%"
+
+:finished
+if not "%EXIT_CODE%"=="0" (
+    echo Failed to copy the Notion content to the clipboard.
+    pause
+    exit /b %EXIT_CODE%
+)
+
+echo Copy completed. Paste into Notion with Ctrl+V.
+pause
+exit /b 0'''
+
+
+NOTION_COPY_PYTHON_TEMPLATE = r'''from pathlib import Path
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+BASE_DIR = Path(__file__).resolve().parent
+HTML_PATH = BASE_DIR / "notion_ready.html"
+MARKDOWN_PATH = BASE_DIR / "notion_ready.md"
+
+GMEM_MOVEABLE = 0x0002
+CF_UNICODETEXT = 13
+OPEN_RETRIES = 5
+OPEN_RETRY_DELAY_SEC = 0.1
+
+
+def configure_win32():
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wintypes.HANDLE
+    kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = [wintypes.HANDLE]
+    kernel32.GlobalFree.restype = wintypes.HANDLE
+
+    user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+    user32.RegisterClipboardFormatW.restype = wintypes.UINT
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    return kernel32, user32
+
+
+def build_cf_html(html: str) -> bytes:
+    start_marker = "<!--StartFragment-->"
+    end_marker = "<!--EndFragment-->"
+    if start_marker not in html or end_marker not in html:
+        html = start_marker + html + end_marker
+
+    html_bytes = html.encode("utf-8")
+    header_template = (
+        "Version:1.0\r\n"
+        "StartHTML:{starthtml:010d}\r\n"
+        "EndHTML:{endhtml:010d}\r\n"
+        "StartFragment:{startfragment:010d}\r\n"
+        "EndFragment:{endfragment:010d}\r\n"
+    )
+    placeholder = header_template.format(
+        starthtml=0, endhtml=0, startfragment=0, endfragment=0
+    ).encode("ascii")
+    start_html = len(placeholder)
+    start_fragment = start_html + html_bytes.index(start_marker.encode("ascii")) + len(start_marker)
+    end_fragment = start_html + html_bytes.index(end_marker.encode("ascii"))
+    end_html = start_html + len(html_bytes)
+    header = header_template.format(
+        starthtml=start_html,
+        endhtml=end_html,
+        startfragment=start_fragment,
+        endfragment=end_fragment,
+    ).encode("ascii")
+    return header + html_bytes + b"\x00"
+
+
+def allocate_bytes(kernel32, data: bytes):
+    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+    if not handle:
+        raise OSError("GlobalAlloc failed")
+    pointer = kernel32.GlobalLock(handle)
+    if not pointer:
+        kernel32.GlobalFree(handle)
+        raise OSError("GlobalLock failed")
+    try:
+        ctypes.memmove(pointer, data, len(data))
+    finally:
+        kernel32.GlobalUnlock(handle)
+    return handle
+
+
+def open_clipboard_with_retry(user32) -> None:
+    for attempt in range(OPEN_RETRIES):
+        if user32.OpenClipboard(None):
+            return
+        if attempt + 1 < OPEN_RETRIES:
+            time.sleep(OPEN_RETRY_DELAY_SEC)
+    raise OSError(f"OpenClipboard failed after {OPEN_RETRIES} attempts")
+
+
+def set_clipboard(html_data: bytes | None, text: str) -> None:
+    kernel32, user32 = configure_win32()
+    html_format = user32.RegisterClipboardFormatW("HTML Format")
+    if html_data is not None and not html_format:
+        raise OSError("RegisterClipboardFormat failed")
+
+    html_handle = None
+    text_handle = None
+    opened = False
+    try:
+        html_handle = allocate_bytes(kernel32, html_data) if html_data is not None else None
+        text_handle = allocate_bytes(kernel32, (text + "\x00").encode("utf-16-le"))
+        open_clipboard_with_retry(user32)
+        opened = True
+        if not user32.EmptyClipboard():
+            raise OSError("EmptyClipboard failed")
+        if html_handle is not None:
+            if not user32.SetClipboardData(html_format, html_handle):
+                raise OSError("SetClipboardData for HTML failed")
+            html_handle = None
+        if not user32.SetClipboardData(CF_UNICODETEXT, text_handle):
+            raise OSError("SetClipboardData for text failed")
+        text_handle = None
+    finally:
+        if opened:
+            user32.CloseClipboard()
+        if html_handle:
+            kernel32.GlobalFree(html_handle)
+        if text_handle:
+            kernel32.GlobalFree(text_handle)
+
+
+def main() -> int:
+    if sys.platform != "win32":
+        print("This copy tool must be run on Windows.")
+        return 1
+    if not HTML_PATH.is_file() or not MARKDOWN_PATH.is_file():
+        print("notion_ready.html or notion_ready.md is missing.")
+        return 1
+
+    markdown = MARKDOWN_PATH.read_text(encoding="utf-8")
+    try:
+        html = HTML_PATH.read_text(encoding="utf-8")
+        set_clipboard(build_cf_html(html), markdown)
+        print("Notion HTML copied successfully. Open Notion and press Ctrl+V.")
+        return 0
+    except Exception as html_error:
+        print(f"HTML copy failed: {html_error}")
+        print("Trying Markdown text fallback...")
+        try:
+            set_clipboard(None, markdown)
+            print("Markdown copied successfully. Open Notion and press Ctrl+V.")
+            return 0
+        except Exception as markdown_error:
+            print(f"Markdown fallback failed: {markdown_error}")
+            return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())'''
+
+
+WINDOWS_SAFE_NOTION_PACKAGE_RULES = (r'''
 ## Windows-safe Notion 패키지 필수 규칙
 
 이 절은 다른 모든 파일명·실행 지시보다 우선합니다. 파일명을 번역하거나 임의로 변경하지 마세요.
@@ -235,27 +426,10 @@ WINDOWS_SAFE_NOTION_PACKAGE_RULES = r'''
 ### COPY_TO_NOTION.bat
 
 BAT와 Python 사이의 호출 파일명은 대소문자를 포함해 정확히 일치해야 합니다.
-아래 명령 구조를 그대로 사용하고 사용자 컴퓨터의 절대 경로를 넣지 마세요.
+아래 템플릿을 파일 내용으로 그대로 사용하고 사용자 컴퓨터의 절대 경로를 넣지 마세요.
 
 ```bat
-@echo off
-setlocal
-chcp 65001 >nul
-cd /d "%~dp0"
-
-where py >nul 2>nul
-if not errorlevel 1 (
-    py -3 "%~dp0copy_to_notion.py"
-) else (
-    python "%~dp0copy_to_notion.py"
-)
-
-set "EXIT_CODE=%ERRORLEVEL%"
-if not "%EXIT_CODE%"=="0" (
-    echo Failed to copy the Notion content to the clipboard.
-    pause
-)
-exit /b %EXIT_CODE%
+''' + NOTION_COPY_BAT_TEMPLATE + r'''
 ```
 
 - 현재 작업 디렉터리에 의존하지 말고 `%~dp0`를 사용하세요.
@@ -266,44 +440,10 @@ exit /b %EXIT_CODE%
 
 ### copy_to_notion.py
 
-경로 기준은 반드시 다음과 같아야 합니다.
+아래 검증된 전체 템플릿을 파일 내용으로 그대로 사용하세요. 요약하거나 다른 `ctypes` 구현으로 바꾸지 마세요.
 
 ```python
-from pathlib import Path
-
-BASE_DIR = Path(__file__).resolve().parent
-HTML_PATH = BASE_DIR / "notion_ready.html"
-MARKDOWN_PATH = BASE_DIR / "notion_ready.md"
-```
-
-- 64비트 Windows에서 포인터가 잘리지 않도록 Win32 API의 `argtypes`와 `restype`를 반드시 명시하세요.
-- `ctypes.windll.kernel32.GlobalAlloc` 등을 반환형 선언 없이 직접 호출하지 마세요. 기본 `c_int` 반환형은 64비트 메모리 핸들을 잘라 `GlobalLock failed`를 일으킬 수 있습니다.
-- 최소한 아래 선언과 동등한 타입 구성을 그대로 사용하세요.
-
-```python
-import ctypes
-from ctypes import wintypes
-
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-user32 = ctypes.WinDLL("user32", use_last_error=True)
-
-kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-kernel32.GlobalAlloc.restype = wintypes.HANDLE
-kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
-kernel32.GlobalLock.restype = ctypes.c_void_p
-kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
-kernel32.GlobalUnlock.restype = wintypes.BOOL
-kernel32.GlobalFree.argtypes = [wintypes.HANDLE]
-kernel32.GlobalFree.restype = wintypes.HANDLE
-
-user32.OpenClipboard.argtypes = [wintypes.HWND]
-user32.OpenClipboard.restype = wintypes.BOOL
-user32.EmptyClipboard.argtypes = []
-user32.EmptyClipboard.restype = wintypes.BOOL
-user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
-user32.SetClipboardData.restype = wintypes.HANDLE
-user32.CloseClipboard.argtypes = []
-user32.CloseClipboard.restype = wintypes.BOOL
+''' + NOTION_COPY_PYTHON_TEMPLATE + r'''
 ```
 
 - 현재 작업 디렉터리나 사용자별 절대 경로를 사용하지 마세요.
@@ -315,6 +455,7 @@ user32.CloseClipboard.restype = wintypes.BOOL
 - 클립보드를 연 뒤에는 성공·실패와 관계없이 `finally`에서 반드시 닫으세요.
 - `SetClipboardData` 성공 후에는 메모리 핸들의 소유권이 Windows로 이전되므로 직접 해제하지 마세요. 실패한 경우에만 `GlobalFree`를 호출하세요.
 - 입력 파일 누락이나 클립보드 실패는 이해 가능한 오류를 출력하고 0이 아닌 exit code로 종료하세요.
+- 위 템플릿에서 `ctypes.windll`, 반환형이 없는 `GlobalAlloc`/`GlobalLock`, 무제한 재시도 코드로 교체하지 마세요.
 
 ### 생성 전 검증
 
@@ -323,7 +464,7 @@ user32.CloseClipboard.restype = wintypes.BOOL
 - 사용자 컴퓨터의 절대 경로가 어떤 파일에도 들어 있지 않은지 검사하세요.
 - Windows CMD에서 한글 사용자명, 공백 또는 한글이 포함된 상위 폴더에 압축을 풀어도 실행되어야 합니다.
 - `README.txt`에는 ZIP을 푼 뒤 `COPY_TO_NOTION.bat`을 실행하고 Notion에서 Ctrl+V하는 방법을 안내하세요.
-'''.strip()
+''').strip()
 
 CAPTURE_FIRST_GUIDE = '''# CAPTURE_FIRST_GUIDE
 
