@@ -172,7 +172,6 @@ def load_config() -> dict:
         "cap_reasoning_api_base": "https://integrate.api.nvidia.com/v1/chat/completions",
         "cap_reasoning_connect_timeout_sec": 15,
         "cap_reasoning_timeout_sec": 150,
-        "cap_reasoning_retry_count": 1,
         "cap_reasoning_max_tokens": 4096,
         "cap_reasoning_max_long_side": 3200,
         "copy_cap_to_clipboard_on_done": False,
@@ -188,6 +187,8 @@ def load_config() -> dict:
     # 프로그램 폴더의 config.local.json은 배포 보안을 위해 읽지 않습니다.
     user_config = _read_json_dict(USER_CONFIG_PATH)
     default_config.update(user_config)
+    # 재시도는 modules.model_retry의 공통 정책으로만 관리한다.
+    default_config.pop("cap_reasoning_retry_count", None)
     default_config.update(_read_json_dict(USER_SECRET_PATH))
 
     # 이전 설정을 현재 배포 기본값으로 1회 정리합니다.
@@ -371,7 +372,6 @@ def save_config(config: dict) -> None:
         "cap_reasoning_api_base": str(config.get("cap_reasoning_api_base", "https://integrate.api.nvidia.com/v1/chat/completions")),
         "cap_reasoning_connect_timeout_sec": int(config.get("cap_reasoning_connect_timeout_sec", 15) or 15),
         "cap_reasoning_timeout_sec": int(config.get("cap_reasoning_timeout_sec", 150) or 150),
-        "cap_reasoning_retry_count": int(config.get("cap_reasoning_retry_count", 1) or 1),
         "cap_reasoning_max_tokens": int(config.get("cap_reasoning_max_tokens", 4096) or 4096),
         "cap_reasoning_max_long_side": int(config.get("cap_reasoning_max_long_side", 3200) or 3200),
         "copy_cap_to_clipboard_on_done": False,
@@ -833,9 +833,16 @@ class ClassFlowAIApp:
                 refine_state = "normal"
 
             if mode == "ocr":
-                second_command = self.interpret_corrected_ocr
+                if status == "ocr_failed":
+                    second_text = "다시 시도"
+                    second_command = self.retry_current_model_request
+                    second_state = "normal"
+                else:
+                    second_command = self.interpret_corrected_ocr
 
-                if status == "ocr_interpretation_running":
+                if status == "ocr_failed":
+                    pass
+                elif status == "ocr_interpretation_running":
                     second_text = "OCR 내용 해석 중…"
                 elif corrected_text:
                     second_text = "OCR 내용 해석"
@@ -852,6 +859,10 @@ class ClassFlowAIApp:
 
                 if status == "cap_running":
                     second_text = "CAP 분석 중…"
+                elif status == "cap_failed":
+                    second_text = "다시 시도"
+                    second_command = self.retry_current_model_request
+                    second_state = "normal"
                 elif (
                     cap_text
                     and not cap_text.startswith("CAP 분석 실패")
@@ -872,6 +883,20 @@ class ClassFlowAIApp:
             )
         except Exception:
             pass
+
+    def retry_current_model_request(self):
+        """Retry the selected record without creating another capture or record."""
+        record = self.get_current_record()
+        if record is None:
+            self.set_status("다시 시도할 캡처가 없습니다.")
+            return
+        if str(record.get("mode") or "capture").lower() == "ocr":
+            self.run_ocr_for_record_async(record, auto_copy=True, force=True)
+        else:
+            self.run_cap_reasoning_for_record_async(record, auto_copy=False, force=True)
+
+    def _show_transient_retry_status(self, message: str):
+        self.root.after(0, lambda: self.set_status(message))
 
 
 
@@ -1004,6 +1029,7 @@ class ClassFlowAIApp:
                 result = analyze_capture_image(
                     image_path,
                     inference_config,
+                    on_retry=self._show_transient_retry_status,
                 )
             except Exception as exc:
                 result = (
@@ -1273,6 +1299,7 @@ class ClassFlowAIApp:
                     image_path=image_path,
                     ocr_text=ocr_text,
                     config=self.config,
+                    on_retry=self._show_transient_retry_status,
                 )
             except Exception as exc:
                 corrected = f"OCR 보정 실패\n\n{exc}"
@@ -1882,7 +1909,11 @@ class ClassFlowAIApp:
         def worker():
             self.root.after(0, lambda: self._before_ocr_record(record))
             try:
-                ocr_text = extract_text_from_image(image_path, self.config)
+                ocr_text = extract_text_from_image(
+                    image_path,
+                    self.config,
+                    on_retry=self._show_transient_retry_status,
+                )
             except Exception as e:
                 ocr_text = f"## OCR 실패\n\nOCR 처리 중 예외가 발생했습니다.\n\n### 원인\n\n`{e}`"
             self.root.after(0, lambda: self._after_ocr_record(record, ocr_text, auto_copy=auto_copy))
@@ -2005,7 +2036,11 @@ class ClassFlowAIApp:
         def worker():
             self.root.after(0, before)
             try:
-                result_text = analyze_capture_image(image_path, self.config)
+                result_text = analyze_capture_image(
+                    image_path,
+                    self.config,
+                    on_retry=self._show_transient_retry_status,
+                )
             except Exception as exc:
                 result_text = f"CAP 분석 실패\n\n{exc}"
 
@@ -2169,7 +2204,11 @@ class ClassFlowAIApp:
             self.update_mini_status()
             self.set_status(f"OCR 처리 중: {idx}/{total} {image_path.name}")
             self.root.update_idletasks()
-            ocr_text = extract_text_from_image(image_path, self.config)
+            ocr_text = extract_text_from_image(
+                image_path,
+                self.config,
+                on_retry=self._show_transient_retry_status,
+            )
             record["ocr_text"] = ocr_text
             record["ocr_provider"] = str(self.config.get("nvidia_ocr_model") or "nvidia/nemotron-ocr-v2")
             record["ocr_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2825,7 +2864,6 @@ class ClassFlowAIApp:
                         "cap_reasoning_api_base": "https://integrate.api.nvidia.com/v1/chat/completions",
                         "cap_reasoning_connect_timeout_sec": 15,
                         "cap_reasoning_timeout_sec": 150,
-                        "cap_reasoning_retry_count": 1,
                         "cap_reasoning_max_tokens": 4096,
                         "cap_reasoning_max_long_side": 3200,
                     }

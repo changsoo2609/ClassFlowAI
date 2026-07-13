@@ -39,7 +39,6 @@ class ModelConnectionErrorPathTests(unittest.TestCase):
             "cap_reasoning_api_base": "https://example.test/cap",
             "cap_reasoning_connect_timeout_sec": 1,
             "cap_reasoning_timeout_sec": 1,
-            "cap_reasoning_retry_count": 1,
             "cap_reasoning_max_tokens": 64,
             "cap_reasoning_max_long_side": 64,
             "cap_reasoning_prompt": "test",
@@ -61,7 +60,7 @@ class ModelConnectionErrorPathTests(unittest.TestCase):
         self.assertIn("OCR API가 오류", model_result)
         self.assertEqual(post.call_count, 1)
 
-    @patch("modules.nvidia_cap_reasoner.time.sleep")
+    @patch("modules.model_retry.time.sleep")
     @patch("requests.post")
     def test_cap_timeout_retries_then_reports_timeout(self, post, _sleep):
         post.side_effect = [
@@ -72,7 +71,7 @@ class ModelConnectionErrorPathTests(unittest.TestCase):
         self.assertIn("시간이 초과", result)
         self.assertEqual(post.call_count, 2)
 
-    @patch("modules.nvidia_cap_reasoner.time.sleep")
+    @patch("modules.model_retry.time.sleep")
     @patch("requests.post")
     def test_cap_transient_server_error_retries_successfully(self, post, _sleep):
         post.side_effect = [
@@ -94,7 +93,6 @@ class ModelConnectionErrorPathTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
 
         post.reset_mock()
-        self.cap_config["cap_reasoning_retry_count"] = 0
         post.return_value = response(400, "invalid model")
         model_result = analyze_capture_image(self.image_path, self.cap_config)
         self.assertIn("API가 오류", model_result)

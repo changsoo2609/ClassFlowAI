@@ -8,6 +8,8 @@ from typing import Any
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
+from modules.model_retry import post_with_transient_retry
+
 NVIDIA_MODEL_NAME = "nvidia/nemotron-ocr-v2"
 NVIDIA_MODEL_URL = "https://build.nvidia.com/nvidia/nemotron-ocr-v2"
 NVIDIA_INVOKE_URL = "https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2"
@@ -319,7 +321,7 @@ def _failure(title: str, detail: str, extra: str = "") -> str:
     return body.strip()
 
 
-def extract_text_from_image(image_path: Path, config: dict) -> str:
+def extract_text_from_image(image_path: Path, config: dict, on_retry=None) -> str:
     """
     // 1. NVIDIA API 키 확인하기
     // 2. 캡처 이미지를 base64 data URL로 변환하기
@@ -363,14 +365,24 @@ def extract_text_from_image(image_path: Path, config: dict) -> str:
     for url in candidates:
         last_url = url
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        except Exception as e:
-            last_body = str(e)
+            response = post_with_transient_retry(
+                requests,
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+                on_retry=on_retry,
+            )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_body = type(e).__name__
+            continue
+        except requests.exceptions.RequestException as e:
+            last_body = type(e).__name__
             continue
 
         last_status = response.status_code
         if response.status_code == 404:
-            last_body = response.text[:1200]
+            last_body = f"HTTP {response.status_code}"
             continue
         if response.status_code in {401, 403}:
             return _failure(
@@ -380,20 +392,18 @@ def extract_text_from_image(image_path: Path, config: dict) -> str:
                     f"- 모델: `{config.get('nvidia_ocr_model') or NVIDIA_MODEL_NAME}`\n\n"
                     "설정에서 API 키와 OCR 모델을 확인하세요."
                 ),
-                response.text[:1200],
             )
 
         if response.status_code >= 400:
             return _failure(
                 "OCR API가 오류를 반환했습니다.",
                 f"- HTTP 상태: `{response.status_code}`\n- 모델: `{config.get('nvidia_ocr_model') or NVIDIA_MODEL_NAME}`\n- 요청 주소: `{url}`",
-                response.text[:1200],
             )
 
         try:
             result = response.json()
         except Exception as e:
-            return _failure("OCR API 응답을 JSON으로 해석하지 못했습니다.", f"`{e}`", response.text[:1200])
+            return _failure("OCR API 응답을 JSON으로 해석하지 못했습니다.", f"`{type(e).__name__}`")
 
         raw_text = _extract_text(result)
         cleaned_text = _post_clean_ocr_text(raw_text, config) or "[OCR 결과 없음]"

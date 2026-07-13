@@ -3,11 +3,12 @@ import io
 import json
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
+
+from modules.model_retry import post_with_transient_retry
 
 
 DEFAULT_CAP_MODEL = "qwen/qwen3.5-397b-a17b"
@@ -105,13 +106,6 @@ def build_cap_prompt(config: dict | None = None) -> str:
     return custom_prompt or DEFAULT_CAP_PROMPT
 
 
-def _cap_retry_count(config: dict) -> int:
-    raw_value = config.get("cap_reasoning_retry_count")
-    if raw_value is None or raw_value == "":
-        raw_value = 1
-    return max(0, min(int(raw_value), 3))
-
-
 def _apply_model_request_options(payload: dict, model: str) -> None:
     # Qwen 3.5는 thinking 모드가 기본값이라 짧은 이미지 분석도 첫 응답이
     # 오래 지연될 수 있다. ClassFlowAI는 최종 결과만 사용하므로 공식 API의
@@ -151,7 +145,7 @@ DEFAULT_OCR_CORRECTION_PROMPT = """
 """.strip()
 
 
-def correct_ocr_with_image(image_path: Path, ocr_text: str, config: dict) -> str:
+def correct_ocr_with_image(image_path: Path, ocr_text: str, config: dict, on_retry=None) -> str:
     api_key = _get_api_key(config)
     if not api_key:
         return "OCR 보정 실패\n\nNVIDIA API 키가 없습니다."
@@ -181,7 +175,6 @@ def correct_ocr_with_image(image_path: Path, ocr_text: str, config: dict) -> str
     api_base = str(config.get("cap_reasoning_api_base") or DEFAULT_CAP_API_BASE).strip()
     connect_timeout = int(config.get("cap_reasoning_connect_timeout_sec") or 15)
     read_timeout = int(config.get("cap_reasoning_timeout_sec") or 150)
-    retry_count = _cap_retry_count(config)
     max_tokens = min(int(config.get("cap_reasoning_max_tokens") or 4096), 3000)
 
     prompt = (
@@ -214,60 +207,48 @@ def correct_ocr_with_image(image_path: Path, ocr_text: str, config: dict) -> str
         "Accept": "application/json",
     }
 
-    last_error = ""
-    for attempt in range(retry_count + 1):
-        try:
-            response = requests.post(
-                api_base,
-                headers=headers,
-                json=payload,
-                timeout=(connect_timeout, read_timeout),
-            )
-        except requests.exceptions.Timeout as exc:
-            last_error = f"응답 제한 시간 초과: {exc}"
-            if attempt < retry_count:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            return f"OCR 보정 실패\n\n{last_error}"
-        except Exception as exc:
-            return f"OCR 보정 실패\n\n요청에 실패했습니다.\n{exc}"
+    try:
+        response = post_with_transient_retry(
+            requests,
+            api_base,
+            headers=headers,
+            json=payload,
+            timeout=(connect_timeout, read_timeout),
+            on_retry=on_retry,
+        )
+    except requests.exceptions.Timeout:
+        return "OCR 보정 실패\n\n응답 제한 시간이 초과되었습니다."
+    except requests.exceptions.ConnectionError:
+        return "OCR 보정 실패\n\n서버에 연결하지 못했습니다."
+    except requests.exceptions.RequestException as exc:
+        return f"OCR 보정 실패\n\n요청에 실패했습니다.\n{type(exc).__name__}"
 
-        if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
-            last_error = response.text[:1200]
-            if attempt < retry_count:
-                time.sleep(1.5 * (attempt + 1))
-                continue
+    if response.status_code in {401, 403}:
+        return (
+            "OCR 보정 실패\n\n"
+            f"NVIDIA API 인증에 실패했습니다. HTTP {response.status_code}\n"
+        )
 
-        if response.status_code in {401, 403}:
-            return (
-                "OCR 보정 실패\n\n"
-                f"NVIDIA API 인증에 실패했습니다. HTTP {response.status_code}\n"
-                f"{response.text[:800]}"
-            )
+    if response.status_code >= 400:
+        return (
+            "OCR 보정 실패\n\n"
+            f"API가 오류를 반환했습니다. HTTP {response.status_code}\n"
+        )
 
-        if response.status_code >= 400:
-            return (
-                "OCR 보정 실패\n\n"
-                f"API가 오류를 반환했습니다. HTTP {response.status_code}\n"
-                f"{response.text[:1200]}"
-            )
+    try:
+        result = response.json()
+        corrected = _clean_model_output(_extract_message_text(result))
+    except Exception as exc:
+        return (
+            "OCR 보정 실패\n\n"
+            f"응답을 해석하지 못했습니다.\n{type(exc).__name__}"
+        )
 
-        try:
-            result = response.json()
-            corrected = _clean_model_output(_extract_message_text(result))
-        except Exception as exc:
-            return (
-                "OCR 보정 실패\n\n"
-                f"응답을 해석하지 못했습니다.\n{exc}\n{response.text[:1000]}"
-            )
-
-        return corrected or "OCR 보정 실패\n\n모델이 보정 텍스트를 반환하지 않았습니다."
-
-    return f"OCR 보정 실패\n\n{last_error or '확인 필요'}"
+    return corrected or "OCR 보정 실패\n\n모델이 보정 텍스트를 반환하지 않았습니다."
 
 
 
-def analyze_capture_image(image_path: Path, config: dict) -> str:
+def analyze_capture_image(image_path: Path, config: dict, on_retry=None) -> str:
     api_key = _get_api_key(config)
     if not api_key:
         return _failure("NVIDIA API 키가 없습니다.", "설정에서 NVIDIA API 키를 입력하세요.")
@@ -293,7 +274,6 @@ def analyze_capture_image(image_path: Path, config: dict) -> str:
     api_base = str(config.get("cap_reasoning_api_base") or DEFAULT_CAP_API_BASE).strip()
     connect_timeout = int(config.get("cap_reasoning_connect_timeout_sec") or 15)
     read_timeout = int(config.get("cap_reasoning_timeout_sec") or 150)
-    retry_count = _cap_retry_count(config)
     max_tokens = int(config.get("cap_reasoning_max_tokens") or 4096)
 
     payload = {
@@ -322,51 +302,41 @@ def analyze_capture_image(image_path: Path, config: dict) -> str:
         "Accept": "application/json",
     }
 
-    last_error = ""
-    for attempt in range(retry_count + 1):
-        try:
-            response = requests.post(
-                api_base,
-                headers=headers,
-                json=payload,
-                timeout=(connect_timeout, read_timeout),
-            )
-        except requests.exceptions.Timeout as exc:
-            last_error = f"응답 제한 시간 초과: {exc}"
-            if attempt < retry_count:
-                time.sleep(2.0 * (attempt + 1))
-                continue
-            return _failure("CAP 이미지 추론 시간이 초과되었습니다.", last_error)
-        except Exception as exc:
-            return _failure("CAP 이미지 추론 요청에 실패했습니다.", str(exc))
+    try:
+        response = post_with_transient_retry(
+            requests,
+            api_base,
+            headers=headers,
+            json=payload,
+            timeout=(connect_timeout, read_timeout),
+            on_retry=on_retry,
+        )
+    except requests.exceptions.Timeout:
+        return _failure("CAP 이미지 추론 시간이 초과되었습니다.", "두 번째 요청도 제한 시간을 초과했습니다.")
+    except requests.exceptions.ConnectionError:
+        return _failure("CAP 이미지 추론 서버에 연결하지 못했습니다.", "두 번째 요청도 연결에 실패했습니다.")
+    except requests.exceptions.RequestException as exc:
+        return _failure("CAP 이미지 추론 요청에 실패했습니다.", type(exc).__name__)
 
-        if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
-            last_error = response.text[:1200]
-            if attempt < retry_count:
-                time.sleep(2.0 * (attempt + 1))
-                continue
+    if response.status_code in {401, 403}:
+        return _failure(
+            "NVIDIA API 인증에 실패했습니다.",
+            f"HTTP {response.status_code}",
+        )
 
-        if response.status_code in {401, 403}:
-            return _failure(
-                "NVIDIA API 인증에 실패했습니다.",
-                f"HTTP {response.status_code}\n{response.text[:800]}",
-            )
+    if response.status_code >= 400:
+        return _failure(
+            "CAP 이미지 추론 API가 오류를 반환했습니다.",
+            f"HTTP {response.status_code}",
+        )
 
-        if response.status_code >= 400:
-            return _failure(
-                "CAP 이미지 추론 API가 오류를 반환했습니다.",
-                f"HTTP {response.status_code}\n{response.text[:1200]}",
-            )
+    try:
+        result = response.json()
+        text = _clean_model_output(_extract_message_text(result))
+    except Exception as exc:
+        return _failure(
+            "CAP 이미지 추론 응답을 해석하지 못했습니다.",
+            type(exc).__name__,
+        )
 
-        try:
-            result = response.json()
-            text = _clean_model_output(_extract_message_text(result))
-        except Exception as exc:
-            return _failure(
-                "CAP 이미지 추론 응답을 해석하지 못했습니다.",
-                f"{exc}\n{response.text[:1000]}",
-            )
-
-        return text or _failure("CAP 결과가 비어 있습니다.", "모델이 텍스트를 반환하지 않았습니다.")
-
-    return _failure("CAP 이미지 추론에 실패했습니다.", last_error or "확인 필요")
+    return text or _failure("CAP 결과가 비어 있습니다.", "모델이 텍스트를 반환하지 않았습니다.")
