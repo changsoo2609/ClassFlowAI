@@ -188,11 +188,11 @@ API 호출이 필요한 검사는 테스트용 개인 키로 수행하고 키와
 
 ClassFlowAI는 최종 `notion_paste_package.zip`을 직접 생성하지 않는다. GPT 전달 ZIP의 `PROMPT_FOR_CHATGPT.txt`와 `CAPTURE_FIRST_GUIDE.md`가 외부 GPT에 생성을 지시한다.
 
-최종 Notion ZIP의 루트 파일명은 `notion_ready.html`, `notion_ready.md`, `COPY_TO_NOTION.bat`, `copy_to_notion.py`, `README.txt`로 고정한다. 실행 관련 파일명은 ASCII 영문·숫자·밑줄만 사용하며 번역하거나 한글 이름으로 바꾸지 않는다. BAT는 `%~dp0`, Python은 `Path(__file__).resolve().parent`를 사용하므로 현재 작업 디렉터리나 사용자별 절대 경로에 의존하지 않아야 한다.
+최종 Notion ZIP의 루트 파일명은 `notion_ready.html`, `notion_ready.md`, `COPY_TO_NOTION.bat`, `copy_to_notion.py`, `README.txt`로 고정하고, 문서에서 실제 사용한 캡처 원본은 `images/`에 포함한다. 실행 관련 파일명과 이미지 파일명은 ASCII 영문·숫자·밑줄만 사용하며 번역하거나 한글 이름으로 바꾸지 않는다. BAT는 `%~dp0`, Python은 `Path(__file__).resolve().parent`를 사용하므로 현재 작업 디렉터리나 사용자별 절대 경로에 의존하지 않아야 한다.
 
 BAT가 호출하는 `copy_to_notion.py`와 실제 ZIP 파일명이 일치하는지, CF_HTML 위치가 UTF-8 바이트 기준인지, 클립보드가 항상 닫히고 잠금 시 제한적으로 재시도하는지 확인한다. 공백과 한글이 포함된 상위 폴더에 GPT 전달 ZIP을 생성·해제하는 테스트를 유지하며, 실제 CMD·Notion 붙여넣기는 Windows 수동 검증 항목으로 남긴다.
 
-`PROMPT_FOR_CHATGPT.txt`에는 검증된 BAT와 Python 전체 템플릿을 원문 그대로 포함한다. 외부 GPT는 이를 요약하거나 다른 `ctypes` 구현으로 바꾸면 안 된다. 특히 64비트 Windows에서 메모리 핸들이 잘리지 않도록 `GlobalAlloc.restype = wintypes.HANDLE`, `GlobalLock.restype = ctypes.c_void_p` 등 Win32 함수 시그니처를 유지해야 한다.
+`PROMPT_FOR_CHATGPT.txt`에는 검증된 BAT와 Python 전체 템플릿을 원문 그대로 포함한다. 외부 GPT는 이를 요약하거나 다른 `ctypes` 구현으로 바꾸면 안 된다. 특히 64비트 Windows에서 메모리 핸들이 잘리지 않도록 `GlobalAlloc.restype = wintypes.HANDLE`, `GlobalLock.restype = ctypes.c_void_p` 등 Win32 함수 시그니처를 유지해야 한다. Python 템플릿은 `notion_ready.html`의 `images/...` 참조를 패키지 내부 파일로 제한해 읽고 Base64 데이터 URI로 변환하므로, CF_HTML에 이미지 바이트가 포함되고 사용자 절대 경로는 노출되지 않는다.
 
 ## 사용자 데이터와 Git
 

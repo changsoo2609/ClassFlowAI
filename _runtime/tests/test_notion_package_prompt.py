@@ -53,6 +53,10 @@ class NotionPackagePromptTests(unittest.TestCase):
         for filename in EXPECTED_PACKAGE_FILES:
             self.assertIn(filename, prompt)
             self.assertIn(filename, guide)
+        self.assertIn("images/", prompt)
+        self.assertIn("images/", guide)
+        self.assertIn("inline_local_images", prompt)
+        self.assertNotIn("정확한 5개 파일만", prompt)
         self.assertNotIn("COPY_TO_CLIPBOARD.bat", prompt)
         self.assertNotIn("copy_to_clipboard.py", prompt)
         self.assertNotRegex(prompt, r"[A-Za-z]:\\Users\\")
@@ -108,6 +112,28 @@ class NotionPackagePromptTests(unittest.TestCase):
         self.assertGreater(offsets["EndFragment"], offsets["StartFragment"])
         self.assertEqual(offsets["EndHTML"], len(payload) - 1)
         self.assertIn("한글 본문".encode("utf-8"), html_bytes)
+
+    def test_canonical_python_inlines_only_packaged_images(self):
+        package_dir = self.root / "notion_package"
+        images_dir = package_dir / "images"
+        images_dir.mkdir(parents=True)
+        packaged_image = images_dir / "capture_001.png"
+        Image.new("RGB", (4, 4), "red").save(packaged_image)
+        namespace = {
+            "__name__": "notion_template_test",
+            "__file__": str(package_dir / "copy_to_notion.py"),
+        }
+        exec(compile(NOTION_COPY_PYTHON_TEMPLATE, "copy_to_notion.py", "exec"), namespace)
+
+        result = namespace["inline_local_images"](
+            '<h2>단계</h2><img src="images/capture_001.png" alt="capture">'
+        )
+        self.assertIn('src="data:image/png;base64,', result)
+        self.assertNotIn(str(package_dir), result)
+        with self.assertRaises(ValueError):
+            namespace["inline_local_images"]('<img src="../capture.png">')
+        with self.assertRaises(ValueError):
+            namespace["inline_local_images"]('<img src="https://example.com/capture.png">')
 
     def test_custom_legacy_prompt_is_normalized_and_mandatory_rules_remain(self):
         prompt = build_chatgpt_prompt(

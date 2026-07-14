@@ -120,6 +120,7 @@
 - 캡처 20~50장 기록의 장시간 안정성
 - GPT ZIP을 이용한 `notion_paste_package.zip` 생성 과정
 - Windows CF_HTML 방식의 최종 Notion 붙여넣기
+- 최종 Notion 패키지에 학습 단계별 캡처 원본을 포함하고 CF_HTML 복사 시 이미지 데이터 내장
 - 실제 수업·정보처리기사 캡처에서 생성된 `study_cards.json` 품질 검증
 - 실제 결과물을 이용한 카드 가져오기·사용자 검토 흐름
 - 실제 수업 카드의 장기간 복습 일정 종단 검증
