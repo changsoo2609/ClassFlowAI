@@ -22,16 +22,12 @@ except Exception:
     pynput_mouse = None
 
 from modules.clipboard_watcher import (
+    clipboard_sequence_changed,
     copy_image_to_clipboard,
     get_clipboard_image,
+    get_clipboard_sequence_number,
     image_hash,
     save_image,
-)
-from modules.chatgpt_handoff_exporter import (
-    DEFAULT_PROMPT_TEMPLATE,
-    build_capture_timeline_markdown,
-    export_chatgpt_handoff_zip,
-    export_preview_html,
 )
 from modules.capture_order import (
     active_ordered_records,
@@ -40,8 +36,13 @@ from modules.capture_order import (
     normalize_display_orders,
     restore_capture_order_if_confirmed,
 )
+from modules.capture_deletion import delete_capture_files
+from modules.flow_document import (
+    build_flow_document,
+    save_flow_document,
+)
+from modules.flow_window import open_flow_result_window
 from modules.storage import (
-    LESSONS_DIR_NAME,
     append_event,
     create_lesson_workspace,
     ensure_workspace,
@@ -49,10 +50,10 @@ from modules.storage import (
     get_default_workspace,
     is_lesson_workspace,
     set_current_lesson,
+    short_workspace_display,
     timestamp_file,
     write_json_atomic,
 )
-from modules.study_card_review import open_study_card_review_window
 from modules.ocr_engine import extract_text_from_image
 from modules.nvidia_cap_reasoner import (
     analyze_capture_image,
@@ -78,31 +79,6 @@ EXIT_CONFIRMATION_MESSAGE = (
     "ClassFlowAI를 종료할까요?\n"
     "현재 저장된 수업 기록과 이미지는 유지됩니다."
 )
-
-
-class GptZipNoCapturesError(Exception):
-    pass
-
-
-def gpt_zip_user_error_message(exc: Exception) -> str:
-    if isinstance(exc, OSError) and getattr(exc, "winerror", None) in {32, 33}:
-        reason = "ZIP 파일이 다른 프로그램에서 사용 중입니다."
-    elif isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
-        reason = "저장 공간이 부족합니다."
-    elif isinstance(exc, PermissionError):
-        reason = "출력 폴더에 파일을 저장할 권한이 없습니다."
-    elif isinstance(exc, FileNotFoundError):
-        reason = "일부 원본 이미지 파일을 찾을 수 없습니다."
-    elif isinstance(exc, (TypeError, ValueError, KeyError)):
-        reason = "캡처 기록 형식을 확인할 수 없습니다."
-    else:
-        reason = "예상하지 못한 내부 오류가 발생했습니다."
-    return (
-        "GPT 전달용 ZIP을 생성하지 못했습니다.\n"
-        "기존 수업 기록과 이미지는 변경되지 않았습니다.\n"
-        f"{reason}\n"
-        "로그를 확인한 후 다시 시도해 주세요."
-    )
 
 
 def confirm_application_exit(confirm_callback, close_callback) -> bool:
@@ -200,8 +176,6 @@ def load_config() -> dict:
         "mini_status_y": 20,
         "mini_status_width": 56,
         "mini_status_height": 56,
-        "html_flow_subject": "",
-        "html_flow_prompt_template": DEFAULT_PROMPT_TEMPLATE,
         "ocr_provider": "nvidia_nim",
         "nvidia_api_key": "",
         "nvidia_ocr_model": "nvidia/nemotron-ocr-v2",
@@ -252,6 +226,17 @@ def load_config() -> dict:
 
     migrated = dict(user_config)
     migration_needed = False
+    removed_export_settings = (
+        "html_flow_subject",
+        "html_flow_prompt_template",
+        "chatgpt_handoff_subject",
+        "chatgpt_handoff_prompt_template",
+    )
+    for key in removed_export_settings:
+        default_config.pop(key, None)
+        if key in migrated:
+            migrated.pop(key, None)
+            migration_needed = True
 
     if schema_version < 2:
         old_mode = str(
@@ -339,22 +324,6 @@ def load_config() -> dict:
         default_config["copy_cap_to_clipboard_on_done"] = False
         migrated["copy_cap_to_clipboard_on_done"] = False
 
-        current_prompt = str(
-            user_config.get("html_flow_prompt_template")
-            or ""
-        )
-        if (
-            not current_prompt.strip()
-            or "LLM 보조 검토 결과" in current_prompt
-            or "# 10. 최종 산출물" in current_prompt
-        ):
-            default_config["html_flow_prompt_template"] = (
-                DEFAULT_PROMPT_TEMPLATE
-            )
-            migrated["html_flow_prompt_template"] = (
-                DEFAULT_PROMPT_TEMPLATE
-            )
-
         migrated["settings_schema_version"] = 5
         migration_needed = True
 
@@ -367,16 +336,8 @@ def load_config() -> dict:
         except Exception:
             pass
 
-    # 이전 설정명 자동 호환
-    if not str(default_config.get("html_flow_prompt_template") or "").strip():
-        old_prompt = default_config.get("chatgpt_handoff_prompt_template")
-        default_config["html_flow_prompt_template"] = old_prompt if old_prompt else DEFAULT_PROMPT_TEMPLATE
     if not str(default_config.get("cap_reasoning_prompt") or "").strip():
         default_config["cap_reasoning_prompt"] = DEFAULT_CAP_PROMPT
-    if not str(default_config.get("html_flow_subject") or "").strip():
-        old_subject = default_config.get("chatgpt_handoff_subject")
-        if old_subject:
-            default_config["html_flow_subject"] = old_subject
 
     return default_config
 
@@ -402,8 +363,6 @@ def save_config(config: dict) -> None:
         "mini_status_width": int(config.get("mini_status_width", 56)),
         "mini_status_height": int(config.get("mini_status_height", 56)),
         "copy_ocr_to_clipboard_on_done": bool(config.get("copy_ocr_to_clipboard_on_done", True)),
-        "html_flow_subject": str(config.get("html_flow_subject", "")),
-        "html_flow_prompt_template": str(config.get("html_flow_prompt_template", DEFAULT_PROMPT_TEMPLATE)),
         "ocr_provider": "nvidia_nim",
         "nvidia_ocr_model": str(config.get("nvidia_ocr_model", "nvidia/nemotron-ocr-v2")),
         "nvidia_model_url": str(config.get("nvidia_model_url", "https://build.nvidia.com/nvidia/nemotron-ocr-v2")),
@@ -464,6 +423,7 @@ class ClassFlowAIApp:
         self.hotkey_capture_active = False
         self.last_mode_toggle_at = 0.0
         self.last_hash = None
+        self.last_clipboard_sequence = None
         self.current_preview = None
         self.capture_records: list[dict] = []
         self.current_record_index = -1
@@ -481,9 +441,9 @@ class ClassFlowAIApp:
         self.execution_timer_job = None
         self.pending_capture_updates = 0
         self.lesson_switch_lock = threading.RLock()
-        self.gpt_zip_generation_active = False
-        self.gpt_zip_previous_processing_state = self.processing_state
-
+        self.flow_interpretation_queue = queue.Queue()
+        self.flow_interpretation_pending = set()
+        self.flow_interpretation_lock = threading.RLock()
         self.load_records()
 
         self.root.title("ClassFlowAI")
@@ -507,6 +467,11 @@ class ClassFlowAIApp:
 
         self.watch_thread = threading.Thread(target=self.clipboard_watch_loop, daemon=True)
         self.watch_thread.start()
+        self.flow_interpretation_worker = threading.Thread(
+            target=self._flow_interpretation_worker_loop,
+            daemon=True,
+        )
+        self.flow_interpretation_worker.start()
 
     def build_ui(self):
         top = tk.Frame(self.root)
@@ -564,16 +529,7 @@ class ClassFlowAIApp:
 
         bottom = tk.Frame(self.root)
         bottom.pack(side="bottom", fill="x", padx=10, pady=(4, 8))
-        self.gpt_zip_button = tk.Button(
-            bottom,
-            text="GPT ZIP파일 생성",
-            command=self.export_chatgpt_handoff_zip_ui,
-            width=20,
-            height=2,
-        )
-        self.gpt_zip_button.pack(side="left", padx=(0, 6))
-        tk.Button(bottom, text="HTML 흐름", command=self.open_html_flow_window, width=16, height=2).pack(side="left", padx=6)
-        tk.Button(bottom, text="학습카드", command=self.open_study_cards_window, width=14, height=2).pack(side="left", padx=6)
+        tk.Button(bottom, text="수업 흐름", command=self.open_flow_window, width=16, height=2).pack(side="left")
         tk.Button(bottom, text="설정", command=self.open_settings_window, width=12, height=2).pack(side="right")
         tk.Button(bottom, text="캡처 폴더 열기", command=self.open_capture_folder, width=16, height=2).pack(side="right", padx=(0, 6))
 
@@ -638,12 +594,12 @@ class ClassFlowAIApp:
         self.flow_text.bind("<Key>", self.guard_result_text_edit)
 
         result_actions = tk.Frame(right)
-        result_actions.pack(fill="x", pady=(8, 0))
+        self.result_actions = result_actions
 
         self.ocr_refine_button = tk.Button(
             result_actions,
-            text="OCR 보정 후 복사",
-            command=self.refine_current_ocr_and_copy,
+            text="CAP 원본 이미지 복사",
+            command=self.copy_current_cap_image,
             width=18,
             height=2,
             state="disabled",
@@ -724,10 +680,7 @@ class ClassFlowAIApp:
             process_mode = str(self.execution_mode or "").lower()
             record_mode = str(target_record.get("mode") or "capture").lower()
 
-            if process_mode == "ocr_interpret":
-                key = "ocr_interpretation_elapsed_sec"
-                target_record["last_process_type"] = "ocr_interpret"
-            elif process_mode == "ocr_refine":
+            if process_mode == "ocr_refine":
                 key = "ocr_correction_elapsed_sec"
                 target_record["last_process_type"] = "ocr_refine"
             elif process_mode == "ocr" or record_mode == "ocr":
@@ -766,9 +719,7 @@ class ClassFlowAIApp:
             and record is self.execution_record
         ):
             elapsed = time.perf_counter() - self.execution_started_at
-            if self.execution_mode == "ocr_interpret":
-                mode_name = "OCR 해석"
-            elif self.execution_mode == "ocr_refine":
+            if self.execution_mode == "ocr_refine":
                 mode_name = "OCR 보정"
             elif self.execution_mode == "ocr":
                 mode_name = "OCR"
@@ -789,10 +740,7 @@ class ClassFlowAIApp:
         mode = str(record.get("mode") or "capture").lower()
         last_process = str(record.get("last_process_type") or "").lower()
 
-        if last_process == "ocr_interpret" and record.get("ocr_interpretation_elapsed_sec") is not None:
-            elapsed = record.get("ocr_interpretation_elapsed_sec")
-            mode_name = "OCR 해석"
-        elif last_process == "ocr_refine" and record.get("ocr_correction_elapsed_sec") is not None:
+        if last_process == "ocr_refine" and record.get("ocr_correction_elapsed_sec") is not None:
             elapsed = record.get("ocr_correction_elapsed_sec")
             mode_name = "OCR 보정"
         elif mode == "ocr":
@@ -879,82 +827,75 @@ class ClassFlowAIApp:
             return
 
         record = self.get_current_record()
+        mode = str(record.get("mode") or "capture").lower() if record is not None else ""
+
+        if record is None:
+            try:
+                self.result_actions.pack_forget()
+            except Exception:
+                pass
+            return
+
+        try:
+            if not self.result_actions.winfo_manager():
+                self.result_actions.pack(fill="x", pady=(8, 0))
+        except Exception:
+            pass
+
+        if mode == "ocr":
+            status = str(record.get("status") or "")
+            ocr_text = str(record.get("ocr_text") or "").strip()
+            refine_state = "disabled"
+            refine_text = "OCR 보정 후 복사"
+            if status == "ocr_correction_running":
+                refine_text = "OCR 보정 중…"
+            elif ocr_text and not ocr_text.lstrip().startswith("## OCR 실패"):
+                refine_state = "normal"
+            try:
+                if not self.ocr_refine_button.winfo_manager():
+                    self.ocr_refine_button.pack(side="right")
+                else:
+                    self.ocr_refine_button.pack_configure(side="right")
+                self.ocr_refine_button.config(
+                    state=refine_state,
+                    text=refine_text,
+                    command=self.refine_current_ocr_and_copy,
+                )
+                # 수업 흐름 해석은 OCR 완료 후 백그라운드에서 자동 실행된다.
+                # 별도의 수동 실행 버튼은 노출하지 않는다.
+                self.cap_copy_button.pack_forget()
+            except Exception:
+                pass
+            return
+
+        try:
+            if not self.ocr_refine_button.winfo_manager():
+                self.ocr_refine_button.pack(side="left")
+            if not self.cap_copy_button.winfo_manager():
+                self.cap_copy_button.pack(side="left", padx=(8, 0))
+        except Exception:
+            pass
+
         refine_state = "disabled"
-        refine_text = "OCR 보정 후 복사"
-        refine_command = self.refine_current_ocr_and_copy
+        refine_text = "CAP 원본 이미지 복사"
+        refine_command = self.copy_current_cap_image
         second_state = "disabled"
         second_text = "CAP 해석 복사"
         second_command = self.copy_current_cap_result
 
-        if record is not None:
-            mode = str(
-                record.get("mode")
-                or "capture"
-            ).lower()
-            status = str(
-                record.get("status")
-                or ""
-            )
-            ocr_text = str(
-                record.get("ocr_text")
-                or ""
-            ).strip()
-            corrected_text = str(
-                record.get("ocr_corrected_text")
-                or ""
-            ).strip()
-            cap_text = str(
-                record.get("cap_text")
-                or ""
-            ).strip()
-
-            if status == "ocr_correction_running":
-                refine_text = "OCR 보정 중…"
-            elif (
-                mode == "ocr"
-                and ocr_text
-                and not ocr_text.lstrip().startswith("## OCR 실패")
-                and status != "ocr_interpretation_running"
-            ):
-                refine_state = "normal"
-
-            if mode == "ocr":
-                if status == "ocr_failed":
-                    second_text = "다시 시도"
-                    second_command = self.retry_current_model_request
-                    second_state = "normal"
-                else:
-                    second_command = self.interpret_corrected_ocr
-
-                if status == "ocr_failed":
-                    pass
-                elif status == "ocr_interpretation_running":
-                    second_text = "OCR 내용 해석 중…"
-                elif corrected_text:
-                    second_text = "OCR 내용 해석"
-                    second_state = "normal"
-                else:
-                    second_text = "OCR 보정 후 해석"
-            else:
-                refine_text = "CAP 원본 이미지 복사"
-                refine_command = self.copy_current_cap_image
-                image_path = Path(str(record.get("image_path") or ""))
-                if image_path.exists():
-                    refine_state = "normal"
-                second_command = self.copy_current_cap_result
-
-                if status == "cap_running":
-                    second_text = "CAP 분석 중…"
-                elif status == "cap_failed":
-                    second_text = "다시 시도"
-                    second_command = self.retry_current_model_request
-                    second_state = "normal"
-                elif (
-                    cap_text
-                    and not cap_text.startswith("CAP 분석 실패")
-                ):
-                    second_text = "CAP 해석 복사"
-                    second_state = "normal"
+        status = str(record.get("status") or "")
+        cap_text = str(record.get("cap_text") or "").strip()
+        image_path = Path(str(record.get("image_path") or ""))
+        if image_path.exists():
+            refine_state = "normal"
+        if status == "cap_running":
+            second_text = "CAP 분석 중…"
+        elif status == "cap_failed":
+            second_text = "다시 시도"
+            second_command = self.retry_current_model_request
+            second_state = "normal"
+        elif cap_text and not cap_text.startswith("CAP 분석 실패"):
+            second_state = "normal"
 
         try:
             self.ocr_refine_button.config(
@@ -1018,238 +959,6 @@ class ClassFlowAIApp:
             return None
 
         return "break"
-
-
-
-    def interpret_corrected_ocr(self):
-        record = self.get_current_record()
-        if record is None:
-            self.set_status(
-                "해석할 OCR 결과가 없습니다."
-            )
-            return
-
-        if str(
-            record.get("mode")
-            or ""
-        ).lower() != "ocr":
-            self.set_status(
-                "OCR 캡처를 선택하세요."
-            )
-            return
-
-        corrected_text = str(
-            record.get("ocr_corrected_text")
-            or ""
-        ).strip()
-
-        if not corrected_text:
-            self.set_status(
-                "먼저 [OCR 보정 후 복사]를 실행하세요."
-            )
-            return
-
-        image_path = Path(
-            str(
-                record.get("image_path")
-                or ""
-            )
-        )
-        if not image_path.exists():
-            messagebox.showwarning(
-                "OCR 내용 해석 불가",
-                f"원본 이미지를 찾을 수 없습니다.\n\n{image_path}",
-            )
-            return
-
-        if not self.has_nvidia_api_key():
-            messagebox.showwarning(
-                "OCR 내용 해석 불가",
-                "NVIDIA API 키가 없습니다.\n\n설정에서 API 키를 입력하세요.",
-            )
-            return
-
-        base_prompt = str(
-            self.config.get("cap_reasoning_prompt")
-            or DEFAULT_CAP_PROMPT
-        ).strip()
-
-        interpret_prompt = (
-            base_prompt
-            + "\n\n추가 지시:\n"
-            + "- 아래 텍스트는 원본 이미지를 기준으로 보정된 OCR 결과입니다.\n"
-            + "- 원본 이미지와 보정 OCR을 함께 참고하여 내용의 의미, 구조와 흐름을 설명하세요.\n"
-            + "- OCR 전사본을 그대로 반복하지 말고, 학습자가 이해할 수 있게 핵심을 정리하세요.\n"
-            + "- 이미지와 텍스트가 충돌하면 이미지를 우선하세요.\n"
-            + "- 보이지 않는 내용은 추측하지 마세요.\n"
-            + "- 최종 결과만 한국어 Markdown으로 반환하세요.\n\n"
-            + "--- 보정 OCR 시작 ---\n"
-            + corrected_text[:16000]
-            + "\n--- 보정 OCR 끝 ---\n"
-        )
-
-        inference_config = dict(
-            self.config
-        )
-        inference_config[
-            "cap_reasoning_prompt"
-        ] = interpret_prompt
-
-        record["status"] = "ocr_interpretation_running"
-        self.processing_state = "OCR 내용 해석 중"
-        self.start_execution_timer(
-            record,
-            "ocr_interpret",
-        )
-        self.save_records()
-        self.update_result_action_buttons()
-        self.update_ocr_panel()
-        self.update_mini_status()
-        self.update_counter()
-        self.set_status(
-            "보정 OCR과 원본 이미지를 함께 해석 중입니다..."
-        )
-
-        def worker():
-            try:
-                result = analyze_capture_image(
-                    image_path,
-                    inference_config,
-                    on_retry=self._show_transient_retry_status,
-                )
-            except Exception as exc:
-                result = (
-                    "OCR 내용 해석 실패\n\n"
-                    + str(exc)
-                )
-
-            result = str(
-                result
-                or ""
-            )
-            if result.startswith("CAP 분석 실패"):
-                result = result.replace(
-                    "CAP 분석 실패",
-                    "OCR 내용 해석 실패",
-                    1,
-                )
-
-            self.root.after(
-                0,
-                lambda: self._after_ocr_interpretation(
-                    record,
-                    result,
-                ),
-            )
-
-        threading.Thread(
-            target=worker,
-            daemon=True,
-        ).start()
-
-
-    def _after_ocr_interpretation(
-        self,
-        record: dict,
-        result_text: str,
-    ):
-        result_text = str(
-            result_text
-            or ""
-        ).strip()
-        failed = result_text.startswith(
-            "OCR 내용 해석 실패"
-        )
-        elapsed = self.stop_execution_timer(
-            record,
-            save_result=True,
-        )
-
-        if failed:
-            record["status"] = "ocr_corrected"
-            record[
-                "ocr_interpretation_error"
-            ] = result_text
-            record["display_result_type"] = "ocr_corrected"
-            self.processing_state = "OCR 내용 해석 실패"
-        else:
-            record[
-                "ocr_interpretation_text"
-            ] = result_text
-            record[
-                "ocr_interpretation_model"
-            ] = str(
-                self.config.get(
-                    "cap_reasoning_model"
-                )
-                or "qwen/qwen3.5-397b-a17b"
-            )
-            record[
-                "ocr_interpretation_at"
-            ] = time.strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-            record["status"] = "ocr_interpretation_done"
-            record["display_result_type"] = "ocr_interpretation"
-            record.pop(
-                "ocr_interpretation_error",
-                None,
-            )
-            self.processing_state = "OCR 내용 해석 완료"
-
-        self.save_records()
-        self.rebuild_outputs_from_records()
-        self.refresh_current_preview()
-        self.update_mini_status()
-        self.update_counter()
-        self.update_result_action_buttons()
-
-        append_event(
-            self.paths["events"],
-            {
-                "type": "ocr_interpretation_done",
-                "path": str(
-                    record.get("image_path")
-                    or ""
-                ),
-                "failed": failed,
-                "model": str(
-                    self.config.get(
-                        "cap_reasoning_model"
-                    )
-                    or ""
-                ),
-                "elapsed_sec": round(
-                    elapsed,
-                    3,
-                ),
-            },
-        )
-
-        elapsed_text = self.format_execution_seconds(
-            elapsed
-        )
-
-        if failed:
-            self.set_status(
-                f"OCR 내용 해석 실패 ({elapsed_text}). "
-                "보정 OCR 결과는 유지했습니다."
-            )
-            messagebox.showerror(
-                "OCR 내용 해석 실패",
-                result_text,
-            )
-            return
-
-        copied = self.copy_text_to_clipboard(
-            result_text
-        )
-        self.set_status(
-            f"OCR 내용 해석 완료 ({elapsed_text}) + 클립보드 복사 완료"
-            if copied
-            else f"OCR 내용 해석 완료 ({elapsed_text}), 복사 실패"
-        )
-
 
     def copy_current_cap_result(self):
         record = self.get_current_record()
@@ -1425,14 +1134,18 @@ class ClassFlowAIApp:
             record["ocr_correction_error"] = corrected_text
             self.processing_state = "OCR 보정 실패"
         else:
+            flow_was_pending = record.get("flow_interpretation_status") in {"queued", "running"}
             for key in [
                 "ocr_interpretation_text",
-                "ocr_interpretation_model",
-                "ocr_interpretation_at",
                 "ocr_interpretation_error",
-                "ocr_interpretation_elapsed_sec",
+                "flow_interpretation_error",
             ]:
                 record.pop(key, None)
+
+            if flow_was_pending:
+                record["flow_interpretation_requeue"] = True
+            else:
+                record.pop("flow_interpretation_status", None)
 
             record["ocr_corrected_text"] = corrected_text
             record["ocr_correction_model"] = str(
@@ -1481,6 +1194,8 @@ class ClassFlowAIApp:
             if copied
             else f"OCR 보정 완료 ({elapsed_text}), 복사 실패"
         )
+        if not record.get("flow_interpretation_requeue"):
+            self.start_flow_interpretation_background(record, force=True)
 
 
 
@@ -1504,15 +1219,9 @@ class ClassFlowAIApp:
         lesson_name = self.workspace.name or str(self.workspace)
         if is_legacy_workspace:
             lesson_name = f"{lesson_name} (기존 수업)"
-        return f"현재 수업: {lesson_name} | 저장 위치: {self.workspace}"
+        return f"현재 수업: {lesson_name} | 저장 위치: {short_workspace_display(self.workspace)}"
 
     def lesson_switch_blocked(self) -> bool:
-        if self.gpt_zip_generation_active:
-            messagebox.showwarning(
-                "수업 전환 대기",
-                "GPT ZIP 생성이 끝난 뒤 수업을 전환하세요.",
-            )
-            return True
         with self.lesson_switch_lock:
             if self.pending_capture_updates > 0 or self.execution_started_at is not None:
                 messagebox.showwarning(
@@ -1524,8 +1233,6 @@ class ClassFlowAIApp:
 
     def activate_lesson(self, lesson_workspace: Path) -> bool:
         lesson_workspace = Path(lesson_workspace).resolve()
-        if self.gpt_zip_generation_active:
-            return False
         with self.lesson_switch_lock:
             if self.pending_capture_updates > 0 or self.execution_started_at is not None:
                 messagebox.showwarning(
@@ -1588,11 +1295,9 @@ class ClassFlowAIApp:
         if self.lesson_switch_blocked():
             return
 
-        lessons_root = self.storage_root / LESSONS_DIR_NAME
-        initial_dir = lessons_root if lessons_root.exists() else self.storage_root
         selected = filedialog.askdirectory(
             title="이전 수업 폴더 선택",
-            initialdir=str(initial_dir),
+            initialdir=str(self.storage_root),
             mustexist=True,
         )
         if not selected:
@@ -1775,9 +1480,6 @@ class ClassFlowAIApp:
         return "break"
 
     def move_current_capture(self, direction: int):
-        if self.gpt_zip_generation_active:
-            self.set_status("GPT ZIP 생성이 끝난 뒤 캡처 순서를 변경하세요.")
-            return
         record = self.get_current_record()
         if record is None:
             self.set_status("순서를 변경할 캡처를 선택하세요.")
@@ -1790,7 +1492,8 @@ class ClassFlowAIApp:
             try:
                 self.save_records()
             except Exception as exc:
-                for item, previous in zip(self.capture_records, previous_orders):
+                for index, item in enumerate(self.capture_records):
+                    previous = previous_orders[index]
                     if previous is None:
                         item.pop("display_order", None)
                     else:
@@ -1803,9 +1506,6 @@ class ClassFlowAIApp:
         self.set_status("캡처 학습 흐름 순서를 변경했습니다.")
 
     def confirm_restore_capture_order(self):
-        if self.gpt_zip_generation_active:
-            self.set_status("GPT ZIP 생성이 끝난 뒤 촬영 순서를 복원하세요.")
-            return
         with self.lesson_switch_lock:
             previous_orders = [item.get("display_order") for item in self.capture_records]
             confirmed = False
@@ -1826,7 +1526,8 @@ class ClassFlowAIApp:
             try:
                 self.save_records()
             except Exception as exc:
-                for item, previous in zip(self.capture_records, previous_orders):
+                for index, item in enumerate(self.capture_records):
+                    previous = previous_orders[index]
                     if previous is None:
                         item.pop("display_order", None)
                     else:
@@ -1869,16 +1570,22 @@ class ClassFlowAIApp:
         if save_records:
             self.save_records()
         try:
-            active = active_ordered_records(self.capture_records)
-            timeline_path = self.paths["outputs"] / "CAPTURE_TIMELINE.md"
-            timeline_path.parent.mkdir(parents=True, exist_ok=True)
-            timeline_path.write_text(build_capture_timeline_markdown(active, image_dir_name="../captures"), encoding="utf-8")
-            export_preview_html(active, self.paths["notion_preview_html"])
+            document = self.build_current_flow_document()
+            save_flow_document(self.paths["flow_document"], document)
         except Exception as e:
-            append_event(self.paths["events"], {"type": "timeline_write_failed", "error": str(e)})
+            append_event(self.paths["events"], {"type": "flow_document_write_failed", "error": str(e)})
+
+    def build_current_flow_document(self) -> dict:
+        return build_flow_document(self.capture_records, title=self.workspace.name or "수업 흐름")
 
     def initialize_clipboard_baseline(self):
-        if not bool(self.config.get("ignore_existing_clipboard_on_start", True)):
+        ignore_existing = bool(self.config.get("ignore_existing_clipboard_on_start", True))
+        self.last_clipboard_sequence = get_clipboard_sequence_number() if ignore_existing else None
+        if not ignore_existing:
+            return
+        # Windows에서는 변경 번호만 기억하면 고해상도 클립보드 이미지를 시작 시
+        # 읽고 변환할 필요가 없다. API를 사용할 수 없을 때만 기존 방식으로 대체한다.
+        if self.last_clipboard_sequence is not None:
             return
         try:
             image = get_clipboard_image()
@@ -1891,6 +1598,12 @@ class ClassFlowAIApp:
         while self.running:
             try:
                 if not self.paused:
+                    sequence = get_clipboard_sequence_number()
+                    if not clipboard_sequence_changed(self.last_clipboard_sequence, sequence):
+                        time.sleep(float(self.config.get("poll_interval_sec", 1.0)))
+                        continue
+                    if sequence is not None:
+                        self.last_clipboard_sequence = sequence
                     image = get_clipboard_image()
                     if image is not None:
                         h = image_hash(image)
@@ -1976,29 +1689,76 @@ class ClassFlowAIApp:
         self.refresh_current_preview()
 
     def delete_current_record(self):
-        if self.gpt_zip_generation_active:
-            self.set_status("GPT ZIP 생성이 끝난 뒤 캡처 기록을 제외하세요.")
-            return
         record = self.get_current_record()
         if record is None:
             return
-        if not messagebox.askyesno("현재 캡처 삭제", "현재 기록을 목록에서 제외할까요?\n원본 이미지 파일은 삭제하지 않습니다."):
+        capture_id = str(record.get("record_id") or "").strip()
+        image_path = Path(str(record.get("image_path") or ""))
+        if not messagebox.askyesno(
+            "현재 캡처 삭제",
+            "현재 캡처의 원본 이미지와 연결된 결과를 삭제할까요?\n"
+            "삭제한 파일은 복구할 수 없습니다.",
+        ):
             return
-        record["deleted"] = True
-        self.save_records()
-        active = self.active_record_indices()
-        self.current_record_index = active[-1] if active else -1
-        self.rebuild_outputs_from_records()
-        self.refresh_current_preview()
-        self.set_status("현재 캡처 기록을 제외했습니다.")
 
-    def reset_today(self):
-        if self.gpt_zip_generation_active:
-            messagebox.showwarning(
-                "초기화 대기",
-                "GPT ZIP 생성이 끝난 뒤 수업을 초기화하세요.",
+        try:
+            with self.lesson_switch_lock:
+                if self.execution_record is record or self.pending_capture_updates > 0:
+                    messagebox.showwarning(
+                        "캡처 삭제 대기",
+                        "현재 캡처 처리가 끝난 뒤 삭제해 주세요.",
+                    )
+                    return
+                deletion = delete_capture_files(self.workspace, record, self.capture_records)
+                self.capture_records.remove(record)
+                normalize_display_orders(self.capture_records)
+                self.save_records()
+        except Exception as exc:
+            failed_path = getattr(exc, "path", None) or image_path
+            try:
+                append_event(
+                    self.paths["events"],
+                    {
+                        "type": "capture_delete_failed",
+                        "captureId": capture_id,
+                        "path": str(failed_path),
+                        "exists": Path(failed_path).exists(),
+                        "error": str(exc),
+                        "stack": traceback.format_exc(),
+                    },
+                )
+            except Exception:
+                pass
+            messagebox.showerror(
+                "캡처 삭제 실패",
+                "캡처 원본 파일을 삭제하지 못했습니다.\n"
+                "파일이 다른 프로그램에서 사용 중인지 확인해 주세요.\n\n"
+                f"{exc}",
             )
             return
+
+        for failure in deletion.get("failed_related", []):
+            try:
+                append_event(
+                    self.paths["events"],
+                    {
+                        "type": "capture_related_file_delete_failed",
+                        "captureId": capture_id,
+                        "path": str(failure["path"]),
+                        "error": failure["error"],
+                    },
+                )
+            except Exception:
+                pass
+        active = self.active_record_indices()
+        self.current_record_index = active[-1] if active else -1
+        self.rebuild_outputs_from_records(save_records=False)
+        self.refresh_current_preview()
+        self.set_status(
+            f"캡처를 삭제했습니다. 관련 파일 {len(deletion['deleted'])}개를 정리했습니다."
+        )
+
+    def reset_today(self):
         with self.lesson_switch_lock:
             if self.pending_capture_updates > 0 or self.execution_started_at is not None:
                 messagebox.showwarning(
@@ -2225,6 +1985,10 @@ class ClassFlowAIApp:
             "ocr_correction_at",
             "ocr_correction_error",
             "ocr_correction_elapsed_sec",
+            "ocr_interpretation_text",
+            "ocr_interpretation_error",
+            "flow_interpretation_status",
+            "flow_interpretation_error",
         ]:
             record.pop(key, None)
         record["ocr_cleaned_diff"] = bool((raw_text or "").strip() and (raw_text or "").strip() != (cleaned_text or "").strip())
@@ -2259,14 +2023,185 @@ class ClassFlowAIApp:
             self.set_status(f"OCR 실패 ({self.format_execution_seconds(elapsed)}): 설정/API 키 또는 OCR 응답을 확인하세요.")
             return
 
+        # 빠른 OCR 결과는 즉시 사용할 수 있게 두고, 수업 흐름용 의미 해석은
+        # 별도 작업에서 진행한다. 이 작업은 현재 결과 패널이나 클립보드를 바꾸지 않는다.
+        interpretation_started = self.start_flow_interpretation_background(record)
+        background_suffix = " · 수업 흐름 해석은 백그라운드 진행" if interpretation_started else ""
+
         if auto_copy and bool(self.config.get("copy_ocr_to_clipboard_on_done", True)):
             copied = self.copy_text_to_clipboard(cleaned_text)
             elapsed_text = self.format_execution_seconds(elapsed)
             self.set_status(
-                f"OCR 완료 ({elapsed_text}) + 클립보드 복사 완료"
+                f"OCR 완료 ({elapsed_text}) + 클립보드 복사 완료{background_suffix}"
                 if copied
-                else f"OCR 완료 ({elapsed_text}), 복사 실패"
+                else f"OCR 완료 ({elapsed_text}), 복사 실패{background_suffix}"
             )
+        elif interpretation_started:
+            self.set_status(
+                f"OCR 완료 ({self.format_execution_seconds(elapsed)}) · 수업 흐름 해석은 백그라운드 진행"
+            )
+
+
+    def start_flow_interpretation_background(self, record: dict, force: bool = False) -> bool:
+        """Queue an OCR capture for the single lesson-flow interpretation worker."""
+        if not isinstance(record, dict) or str(record.get("mode") or "").lower() != "ocr":
+            return False
+        if record.get("flow_interpretation_status") in {"queued", "running"}:
+            return False
+        if record.get("ocr_interpretation_text") and not force:
+            return False
+
+        ocr_text = str(record.get("ocr_corrected_text") or record.get("ocr_text") or "").strip()
+        image_path = Path(str(record.get("image_path") or ""))
+        if not ocr_text or ocr_text.lstrip().startswith("## OCR 실패") or not image_path.is_file():
+            return False
+        if not self.has_nvidia_api_key():
+            record["flow_interpretation_status"] = "waiting_for_api_key"
+            self.save_records()
+            self.rebuild_outputs_from_records(save_records=False)
+            return False
+
+        workspace_at_start = Path(self.workspace).resolve()
+        record_id = str(record.get("record_id") or "").strip()
+        if not record_id:
+            return False
+        pending_key = (str(workspace_at_start), record_id)
+        with self.flow_interpretation_lock:
+            if pending_key in self.flow_interpretation_pending:
+                return False
+            self.flow_interpretation_pending.add(pending_key)
+
+        base_prompt = str(self.config.get("cap_reasoning_prompt") or DEFAULT_CAP_PROMPT).strip()
+        prompt = (
+            base_prompt
+            + "\n\n수업 흐름 전용 추가 지시:\n"
+            + "- 아래 OCR과 원본 이미지를 함께 보고 학습자가 이해하기 쉬운 해설을 작성하세요.\n"
+            + "- OCR 문장을 그대로 반복하지 말고 개념, 절차, 코드 또는 오류의 의미를 설명하세요.\n"
+            + "- 이미지와 OCR이 충돌하면 이미지를 우선하고 보이지 않는 내용은 추측하지 마세요.\n"
+            + "- 최종 결과만 한국어 Markdown으로 반환하세요.\n\n"
+            + "--- OCR 시작 ---\n"
+            + ocr_text[:16000]
+            + "\n--- OCR 끝 ---\n"
+        )
+        inference_config = dict(self.config)
+        inference_config["cap_reasoning_prompt"] = prompt
+        record["flow_interpretation_status"] = "queued"
+        record.pop("flow_interpretation_error", None)
+        self.save_records()
+        self.rebuild_outputs_from_records(save_records=False)
+        self.update_result_action_buttons()
+        self.flow_interpretation_queue.put({
+            "record": record,
+            "record_id": record_id,
+            "pending_key": pending_key,
+            "workspace": workspace_at_start,
+            "image_path": image_path,
+            "config": inference_config,
+        })
+        return True
+
+
+    def _flow_interpretation_worker_loop(self) -> None:
+        while self.running:
+            try:
+                job = self.flow_interpretation_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if job is None:
+                self.flow_interpretation_queue.task_done()
+                return
+            record = job["record"]
+            workspace_at_start = job["workspace"]
+            pending_key = job["pending_key"]
+            try:
+                if (
+                    Path(self.workspace).resolve() != Path(workspace_at_start).resolve()
+                    or not any(value is record for value in self.capture_records)
+                ):
+                    with self.flow_interpretation_lock:
+                        self.flow_interpretation_pending.discard(pending_key)
+                    continue
+                record["flow_interpretation_status"] = "running"
+                self.root.after(0, lambda current=record: self._mark_flow_interpretation_running(current))
+                try:
+                    result = analyze_capture_image(
+                        job["image_path"],
+                        job["config"],
+                        on_retry=self._show_transient_retry_status,
+                    )
+                except Exception as exc:
+                    result = "수업 흐름 해석 실패\n\n" + str(exc)
+                result = str(result or "").strip()
+                if result.startswith("CAP 분석 실패"):
+                    result = result.replace("CAP 분석 실패", "수업 흐름 해석 실패", 1)
+                self.root.after(
+                    0,
+                    lambda current=record, value=result, workspace=workspace_at_start, key=pending_key: (
+                        self._after_flow_interpretation(current, value, workspace, key)
+                    ),
+                )
+            finally:
+                self.flow_interpretation_queue.task_done()
+
+
+    def _mark_flow_interpretation_running(self, record: dict) -> None:
+        if any(value is record for value in self.capture_records):
+            self.save_records()
+            self.rebuild_outputs_from_records(save_records=False)
+
+
+    def _after_flow_interpretation(
+        self,
+        record: dict,
+        result_text: str,
+        workspace_at_start: Path,
+        pending_key=None,
+    ) -> None:
+        key = pending_key or (
+            str(Path(workspace_at_start).resolve()),
+            str(record.get("record_id") or "").strip(),
+        )
+        with self.flow_interpretation_lock:
+            self.flow_interpretation_pending.discard(key)
+        # 수업을 바꾸거나 캡처를 삭제한 동안 끝난 오래된 작업은 현재 수업에 섞지 않는다.
+        if Path(self.workspace).resolve() != Path(workspace_at_start).resolve():
+            return
+        if not any(value is record for value in self.capture_records):
+            return
+
+        if record.pop("flow_interpretation_requeue", False):
+            record.pop("flow_interpretation_status", None)
+            self.save_records()
+            self.rebuild_outputs_from_records(save_records=False)
+            self.start_flow_interpretation_background(record, force=True)
+            return
+
+        result_text = str(result_text or "").strip()
+        failed = not result_text or result_text.startswith("수업 흐름 해석 실패")
+        if failed:
+            record["flow_interpretation_status"] = "failed"
+            record["flow_interpretation_error"] = result_text or "빈 응답"
+        else:
+            record["flow_interpretation_status"] = "done"
+            record["ocr_interpretation_text"] = result_text
+            record.pop("flow_interpretation_error", None)
+
+        self.save_records()
+        self.rebuild_outputs_from_records(save_records=False)
+        self.update_result_action_buttons()
+        append_event(
+            self.paths["events"],
+            {
+                "type": "flow_interpretation_done",
+                "path": str(record.get("image_path") or ""),
+                "failed": failed,
+                "background": True,
+            },
+        )
+        if failed:
+            self.set_status("OCR 결과는 유지했습니다. 수업 흐름 백그라운드 해석은 실패했습니다.")
+        else:
+            self.set_status("수업 흐름 백그라운드 해석이 완료되었습니다.")
 
 
     def run_cap_reasoning_for_record_async(self, record: dict, auto_copy: bool = False, force: bool = False):
@@ -2373,322 +2308,23 @@ class ClassFlowAIApp:
     def has_nvidia_api_key(self) -> bool:
         return bool(str(self.config.get("nvidia_api_key") or os.environ.get("NVIDIA_API_KEY") or os.environ.get("OCR_API_KEY") or "").strip())
 
-    def build_ocr_timeline_markdown(self, records: list[dict]) -> str:
-        lines = [
-            "# OCR_AND_CAP_TIMELINE",
-            "",
-            "이미지 원본이 최우선이며 아래 결과는 보조 자료입니다.",
-            "",
-            "---",
-            "",
-        ]
-        has_any = False
-
-        for idx, record in enumerate(records, 1):
-            ocr_text = str(record.get("ocr_corrected_text") or record.get("ocr_text") or "").strip()
-            cap_text = str(record.get("cap_text") or "").strip()
-            if not ocr_text and not cap_text:
-                continue
-
-            has_any = True
-            image_path = Path(str(record.get("image_path") or ""))
-            mode = str(record.get("mode") or "capture").lower()
-
-            lines += [
-                f"## {idx}. {image_path.name}",
-                "",
-                f"- 모드: {'OCR' if mode == 'ocr' else 'CAP'}",
-                f"- 이미지 파일: images/{image_path.name}",
-                "",
-            ]
-
-            if ocr_text:
-                lines += [
-                    "### OCR 결과",
-                    "",
-                    "```text",
-                    ocr_text,
-                    "```",
-                    "",
-                ]
-
-            if cap_text:
-                lines += [
-                    "### CAP 이미지 추론 결과",
-                    "",
-                    cap_text,
-                    "",
-                ]
-
-            lines += ["---", ""]
-
-        if not has_any:
-            return "# OCR_AND_CAP_TIMELINE\n\n결과 없음\n"
-
-        return "\n".join(lines)
-
-
-    def write_ocr_timeline(self, records: list[dict]) -> None:
-        try:
-            path = self.paths["outputs"] / "OCR_TIMELINE.md"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(self.build_ocr_timeline_markdown(records), encoding="utf-8")
-        except Exception as e:
-            append_event(self.paths["events"], {"type": "ocr_timeline_write_failed", "error": str(e)})
-
-    def run_nvidia_ocr_for_zip(self, active: list[dict], progress_callback=None) -> None:
-        """
-        // 1. 설정의 NVIDIA API 키 확인하기
-        // 2. OCR 결과가 없는 캡처만 API로 변환하기
-        // 3. OCR_TIMELINE.md를 GPT ZIP에 들어갈 보조 자료로 준비하기
-        """
-        if not self.has_nvidia_api_key():
-            return
-
-        # 현재 OCR 모드이면 전체 캡처를 OCR 대상으로 보고, CAP 모드이면 OCR 모드에서 저장된 캡처만 처리합니다.
-        if self.capture_mode == "ocr":
-            ocr_candidates = active
-        else:
-            ocr_candidates = [r for r in active if str(r.get("mode") or "capture").lower() == "ocr"]
-
-        if not ocr_candidates:
-            return
-
-        targets = [
-            r for r in ocr_candidates
-            if (not str(r.get("ocr_text") or "").strip())
-            or str(r.get("ocr_text") or "").lstrip().startswith("## OCR 실패")
-        ]
-        if not targets:
-            self.write_ocr_timeline(active)
-            return
-
-        total = len(targets)
-        for idx, record in enumerate(targets, 1):
-            image_path = Path(str(record.get("image_path") or ""))
-            if not image_path.exists():
-                continue
-            if progress_callback:
-                progress_callback(f"GPT ZIP 생성 중 · OCR {idx}/{total}")
-            ocr_text = extract_text_from_image(
-                image_path,
-                self.config,
-                on_retry=progress_callback,
-            )
-            record["ocr_text"] = ocr_text
-            record["ocr_provider"] = str(self.config.get("nvidia_ocr_model") or "nvidia/nemotron-ocr-v2")
-            record["ocr_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            append_event(self.paths["events"], {"type": "nvidia_ocr_done", "path": str(image_path), "failed": ocr_text.lstrip().startswith("## OCR 실패")})
-
-        self.save_records()
-        self.write_ocr_timeline(active)
-
-    def export_chatgpt_handoff_zip_ui(self):
-        if self.gpt_zip_generation_active:
-            self.set_status("GPT ZIP을 이미 생성 중입니다.")
-            return
-        if self.pending_capture_updates > 0 or self.execution_started_at is not None:
-            self.set_status("현재 캡처 또는 OCR/CAP 처리가 끝난 뒤 GPT ZIP을 생성하세요.")
-            return
-
-        self.gpt_zip_generation_active = True
-        self.gpt_zip_previous_processing_state = self.processing_state
-        self.processing_state = "GPT ZIP 생성 중"
-        try:
-            self.update_mini_status()
-            self.set_status("GPT 전달용 ZIP 생성 중...")
-            self.gpt_zip_button.config(state="disabled")
-            self.root.config(cursor="watch")
-        except Exception as exc:
-            detail = traceback.format_exc()
-            self._log_gpt_zip_failure(exc, detail)
-            self._finish_gpt_zip_generation(error=exc, detail=detail)
-            return
-
-        try:
-            threading.Thread(target=self._gpt_zip_worker, daemon=True).start()
-        except Exception as exc:
-            detail = traceback.format_exc()
-            self._log_gpt_zip_failure(exc, detail)
-            self._finish_gpt_zip_generation(error=exc, detail=detail)
-
-    def _log_gpt_zip_failure(self, exc: Exception, detail: str):
-        try:
-            append_event(
-                self.paths["events"],
-                {
-                    "type": "gpt_zip_generation_failed",
-                    "error_type": type(exc).__name__,
-                    "traceback": detail,
-                },
-            )
-        except Exception:
-            pass
-
-    def _schedule_gpt_zip_ui(self, callback) -> bool:
-        if self.closing:
-            return False
-        try:
-            if not self.root.winfo_exists():
-                return False
-            self.root.after(0, callback)
-            return True
-        except Exception:
-            return False
-
-    def _report_gpt_zip_progress(self, text: str):
-        def update():
-            if not self.gpt_zip_generation_active or self.closing:
-                return
-            self.processing_state = "GPT ZIP 생성 중"
-            self.set_status(str(text or "GPT 전달용 ZIP 생성 중..."))
-            try:
-                self.update_mini_status()
-            except Exception:
-                pass
-
-        self._schedule_gpt_zip_ui(update)
-
-    def _gpt_zip_worker(self):
-        zip_path = None
-        prompt_text = ""
-        out_dir = None
-        error = None
-        detail = ""
-        try:
-            with self.lesson_switch_lock:
-                self._ensure_records_for_capture_files()
-                active = active_ordered_records(self.capture_records)
-                if not active:
-                    raise GptZipNoCapturesError("no active captures")
-                self.run_nvidia_ocr_for_zip(active, progress_callback=self._report_gpt_zip_progress)
-                self.rebuild_outputs_from_records()
-                out_dir = self.paths["gpt_handoff"]
-                zip_path, prompt_text = export_chatgpt_handoff_zip(
-                    active,
-                    out_dir,
-                    subject=str(self.config.get("html_flow_subject", "")),
-                    prompt_template=str(self.config.get("html_flow_prompt_template", "")),
-                )
-        except Exception as exc:
-            error = exc
-            detail = traceback.format_exc()
-            self._log_gpt_zip_failure(exc, detail)
-
-        scheduled = self._schedule_gpt_zip_ui(
-            lambda: self._finish_gpt_zip_generation(
-                zip_path=zip_path,
-                prompt_text=prompt_text,
-                out_dir=out_dir,
-                error=error,
-                detail=detail,
-            )
-        )
-        if not scheduled:
-            # 창이 이미 닫혔거나 Tk가 콜백을 받을 수 없는 경우에도 작업 플래그는 남기지 않는다.
-            self.gpt_zip_generation_active = False
-            self.processing_state = self.gpt_zip_previous_processing_state
-
-    def _restore_gpt_zip_ui_state(self):
-        self.gpt_zip_generation_active = False
-        self.processing_state = self.gpt_zip_previous_processing_state
-        try:
-            self.gpt_zip_button.config(state="normal")
-        except Exception:
-            pass
-        try:
-            self.root.config(cursor="")
-        except Exception:
-            pass
-        try:
-            self.update_mini_status()
-        except Exception:
-            pass
-
-    def _finish_gpt_zip_generation(
-        self,
-        *,
-        zip_path=None,
-        prompt_text: str = "",
-        out_dir=None,
-        error: Exception | None = None,
-        detail: str = "",
-    ):
-        self._restore_gpt_zip_ui_state()
-        if self.closing:
-            return
-
-        if isinstance(error, GptZipNoCapturesError):
-            self.set_status("GPT ZIP 생성 불가: 전달할 캡처가 없습니다.")
-            messagebox.showwarning(
-                "GPT ZIP파일 생성 불가",
-                "전달할 캡처 파일이 없습니다. 먼저 캡처를 추가해 주세요.",
-            )
-            return
-
-        if error is not None:
-            self.set_status("GPT ZIP 생성 실패. 로그를 확인한 후 다시 시도해 주세요.")
-            messagebox.showerror("GPT ZIP 생성 실패", gpt_zip_user_error_message(error))
-            return
-
-        copied = self.copy_text_to_clipboard(prompt_text)
-        self.set_status(
-            f"GPT ZIP파일 생성 완료: {Path(zip_path).name}"
-            if copied
-            else f"GPT ZIP파일 생성 완료: {Path(zip_path).name} · 프롬프트 복사 실패"
-        )
-        messagebox.showinfo(
-            "GPT ZIP파일 생성 완료",
-            "ZIP은 현재 캡처 파일 기준으로 생성되었습니다.\n"
-            "OCR 모드와 NVIDIA API 키가 있으면 OCR_TIMELINE도 함께 포함됩니다.\n"
-            "프롬프트는 클립보드에 복사되었습니다.\n\n"
-            "1. 열린 폴더의 ZIP 파일을 ChatGPT에 업로드\n"
-            "2. 입력창에 Ctrl+V",
-        )
-        if sys.platform.startswith("win") and out_dir is not None:
-            try:
-                os.startfile(out_dir)
-            except Exception as exc:
-                try:
-                    append_event(
-                        self.paths["events"],
-                        {"type": "gpt_zip_folder_open_failed", "error_type": type(exc).__name__},
-                    )
-                except Exception:
-                    pass
-
-    def open_html_flow_window(self):
-        """
-        // 1. 현재 캡처 목록을 기준으로 HTML 흐름 파일 생성하기
-        // 2. 브라우저에서 HTML 양식/캡처 순서 확인하기
-        // 3. GPT ZIP 생성 전 흐름을 눈으로 확인할 수 있게 하기
-        """
+    def open_flow_window(self):
         self._ensure_records_for_capture_files()
         self.rebuild_outputs_from_records()
-
-        preview_path = self.paths.get("notion_preview_html")
-        if preview_path is None:
-            messagebox.showerror("HTML 흐름 오류", "HTML 흐름 파일 경로를 찾을 수 없습니다.")
-            return
-
         try:
-            active = active_ordered_records(self.capture_records)
-            export_preview_html(active, preview_path)
-            self.set_status(f"HTML 흐름 열기: {preview_path.name}")
-            if sys.platform.startswith("win"):
-                os.startfile(preview_path)
-            else:
-                import webbrowser
-                webbrowser.open(preview_path.as_uri())
+            document = self.build_current_flow_document()
+            save_flow_document(self.paths["flow_document"], document)
+            open_flow_result_window(
+                self.root,
+                self.workspace,
+                document,
+                self.paths["flow_document"],
+                self.set_status,
+                lambda event: append_event(self.paths["events"], event),
+            )
+            self.set_status("현재 수업의 수업 흐름 창을 열었습니다.")
         except Exception as e:
-            messagebox.showerror("HTML 흐름 오류", f"HTML 흐름을 여는 중 오류가 발생했습니다.\n\n{e}")
-
-    def open_study_cards_window(self):
-        try:
-            open_study_card_review_window(self.root, self.workspace, self.config)
-            self.set_status("현재 수업의 학습카드 검토 창을 열었습니다.")
-        except Exception as e:
-            messagebox.showerror("학습카드 열기 실패", str(e))
+            messagebox.showerror("수업 흐름 열기 실패", str(e))
 
     def open_capture_folder(self):
         capture_dir = self.paths.get("captures")
@@ -2761,11 +2397,6 @@ class ClassFlowAIApp:
             padx=16,
             pady=14,
         )
-        gpt_prompt_tab = tk.Frame(
-            notebook,
-            padx=16,
-            pady=14,
-        )
 
         notebook.add(
             basic_tab,
@@ -2774,10 +2405,6 @@ class ClassFlowAIApp:
         notebook.add(
             cap_prompt_tab,
             text="CAP 프롬프트",
-        )
-        notebook.add(
-            gpt_prompt_tab,
-            text="GPT ZIP 프롬프트",
         )
 
         # 기본 / 모델 탭은 한 화면에 전부 표시합니다.
@@ -3149,46 +2776,6 @@ class ClassFlowAIApp:
             ),
         ).pack(side="left")
 
-        # ------------------------------------------------------
-        # GPT prompt only
-        # ------------------------------------------------------
-        section(
-            gpt_prompt_tab,
-            "GPT ZIP 정리 프롬프트",
-        )
-        gpt_prompt_editor = ScrolledText(
-            gpt_prompt_tab,
-            wrap="word",
-            font=("맑은 고딕", 10),
-            undo=True,
-        )
-        gpt_prompt_editor.pack(
-            fill="both",
-            expand=True,
-            pady=(0, 8),
-        )
-        set_prompt_text(
-            gpt_prompt_editor,
-            str(
-                self.config.get("html_flow_prompt_template")
-                or DEFAULT_PROMPT_TEMPLATE
-            ),
-        )
-
-        gpt_buttons = tk.Frame(
-            gpt_prompt_tab
-        )
-        gpt_buttons.pack(fill="x")
-
-        tk.Button(
-            gpt_buttons,
-            text="기본값 복원",
-            command=lambda: set_prompt_text(
-                gpt_prompt_editor,
-                DEFAULT_PROMPT_TEMPLATE,
-            ),
-        ).pack(side="left")
-
         def save_settings():
             try:
                 ocr_model = normalized_ocr_model()
@@ -3214,15 +2801,8 @@ class ClassFlowAIApp:
                     "1.0",
                     "end-1c",
                 ).strip()
-                gpt_prompt = gpt_prompt_editor.get(
-                    "1.0",
-                    "end-1c",
-                ).strip()
-
                 if not cap_prompt:
                     cap_prompt = DEFAULT_CAP_PROMPT
-                if not gpt_prompt:
-                    gpt_prompt = DEFAULT_PROMPT_TEMPLATE
 
                 new_config = dict(self.config)
                 new_config.update(
@@ -3247,7 +2827,6 @@ class ClassFlowAIApp:
                             f"https://build.nvidia.com/{cap_model}"
                         ),
                         "cap_reasoning_prompt": cap_prompt,
-                        "html_flow_prompt_template": gpt_prompt,
 
                         "hide_app_during_screenshot": True,
                         "mini_status_enabled": True,
@@ -3920,11 +3499,7 @@ class ClassFlowAIApp:
                 else "#9a3412"
             )
 
-        self.mini_mode_var.set(
-            "ZIP"
-            if getattr(self, "gpt_zip_generation_active", False)
-            else ("OCR" if self.capture_mode == "ocr" else "CAP")
-        )
+        self.mini_mode_var.set("OCR" if self.capture_mode == "ocr" else "CAP")
         self.mini_state_var.set(state)
 
         try:
@@ -4176,6 +3751,10 @@ class ClassFlowAIApp:
             return
         self.closing = True
         self.running = False
+        try:
+            self.flow_interpretation_queue.put_nowait(None)
+        except Exception:
+            pass
         self.stop_execution_timer(save_result=False)
         try:
             if self.global_keyboard_listener:

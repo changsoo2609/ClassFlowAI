@@ -126,6 +126,23 @@ def _preprocess_for_ocr(img: Image.Image, mode: str) -> Image.Image:
     return img.convert("RGB")
 
 
+def _ocr_resize_scale(
+    long_side: int,
+    upscale_enabled: bool,
+    upscale_factor: float,
+    target_long_side: int,
+    max_long_side: int,
+) -> float:
+    """Resize small inputs toward the target without enlarging already-large captures."""
+    long_side = max(1, int(long_side))
+    scale = 1.0
+    if upscale_enabled and target_long_side > 0 and long_side < target_long_side:
+        scale = min(max(1.0, float(upscale_factor)), target_long_side / long_side)
+    if long_side * scale > max_long_side:
+        scale = max_long_side / long_side
+    return scale
+
+
 
 def _image_to_data_url(image_path: Path, config: dict) -> str:
     """
@@ -145,15 +162,13 @@ def _image_to_data_url(image_path: Path, config: dict) -> str:
     with Image.open(image_path) as img:
         img = img.convert("RGB")
         long_side = max(img.width, img.height)
-        scale = 1.0
-
-        if upscale_enabled:
-            scale = max(scale, upscale_factor)
-            if target_long_side and long_side < target_long_side:
-                scale = max(scale, target_long_side / max(long_side, 1))
-
-        if long_side * scale > max_long_side:
-            scale = max_long_side / max(long_side, 1)
+        scale = _ocr_resize_scale(
+            long_side,
+            upscale_enabled,
+            upscale_factor,
+            target_long_side,
+            max_long_side,
+        )
 
         if scale > 1.01:
             new_size = (

@@ -15,6 +15,26 @@ CLIPBOARD_OPEN_ATTEMPTS = 10
 CLIPBOARD_RETRY_DELAY_SEC = 0.05
 
 
+def get_clipboard_sequence_number() -> int | None:
+    """Return the Windows clipboard change counter without reading its payload."""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetClipboardSequenceNumber.argtypes = []
+        user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
+        return int(user32.GetClipboardSequenceNumber())
+    except Exception:
+        return None
+
+
+def clipboard_sequence_changed(previous: int | None, current: int | None) -> bool:
+    """Fallback to reading when Windows cannot provide a sequence number."""
+    return current is None or previous is None or int(current) != int(previous)
+
+
 def get_clipboard_image() -> Optional[Image.Image]:
     """
     // 1. 클립보드 데이터 읽기

@@ -1,11 +1,11 @@
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
-LESSONS_DIR_NAME = "lessons"
 CURRENT_LESSON_FILE_NAME = ".classflow_current_lesson.json"
 LESSON_METADATA_FILE_NAME = "lesson.json"
 
@@ -38,6 +38,8 @@ def _cleanup_known_garbage(outputs: Path) -> None:
         "notion_paste.html",
         "OCR_TIMELINE.md",
         "notion_paste_preview.html",
+        "html_flow_preview.html",
+        "CAPTURE_TIMELINE.md",
     ]:
         p = outputs / name
         try:
@@ -52,9 +54,7 @@ def ensure_workspace(workspace: Path) -> dict[str, Path]:
     logs = workspace / "logs"
     outputs = workspace / "outputs"
     state = workspace / "state"
-    gpt_handoff = outputs / "gpt_handoff"
-
-    for folder in [workspace, captures, logs, outputs, state, gpt_handoff]:
+    for folder in [workspace, captures, logs, outputs, state]:
         folder.mkdir(parents=True, exist_ok=True)
 
     _cleanup_known_garbage(outputs)
@@ -64,11 +64,9 @@ def ensure_workspace(workspace: Path) -> dict[str, Path]:
         "captures": captures,
         "logs": logs,
         "outputs": outputs,
-        "gpt_handoff": gpt_handoff,
         "events": logs / "events.jsonl",
         "records": state / "capture_records.json",
-        "notion_preview_html": outputs / "html_flow_preview.html",
-        "capture_timeline": outputs / "CAPTURE_TIMELINE.md",
+        "flow_document": state / "flow_document.json",
     }
 
 
@@ -131,17 +129,24 @@ def get_current_lesson(storage_root: Path) -> Path:
     return storage_root
 
 
-def create_lesson_workspace(storage_root: Path) -> Path:
+def _dated_storage_root(storage_root: Path, now: datetime) -> Path:
     storage_root = Path(storage_root).resolve()
-    lessons_root = storage_root / LESSONS_DIR_NAME
-    lessons_root.mkdir(parents=True, exist_ok=True)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", storage_root.name):
+        return storage_root
+    return storage_root / now.strftime("%Y-%m-%d")
 
-    now = datetime.now()
-    stem = now.strftime("lesson_%Y-%m-%d_%H-%M-%S")
-    lesson_workspace = lessons_root / stem
+
+def create_lesson_workspace(storage_root: Path, now: datetime | None = None) -> Path:
+    storage_root = Path(storage_root).resolve()
+    now = now or datetime.now()
+    date_root = _dated_storage_root(storage_root, now)
+    date_root.mkdir(parents=True, exist_ok=True)
+
+    stem = now.strftime("%H-%M-%S")
+    lesson_workspace = date_root / stem
     suffix = 2
     while lesson_workspace.exists():
-        lesson_workspace = lessons_root / f"{stem}_{suffix}"
+        lesson_workspace = date_root / f"{stem}_{suffix}"
         suffix += 1
 
     paths = ensure_workspace(lesson_workspace)
@@ -155,6 +160,17 @@ def create_lesson_workspace(storage_root: Path) -> Path:
     )
     paths["records"].write_text("[]\n", encoding="utf-8")
     return lesson_workspace
+
+
+def short_workspace_display(workspace: Path) -> str:
+    workspace = Path(workspace)
+    parts = workspace.parts
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index].casefold() == "실시간저장".casefold():
+            return str(Path(*parts[index:]))
+    if len(parts) >= 3:
+        return str(Path(*parts[-3:]))
+    return str(workspace)
 
 
 def timestamp_file() -> str:

@@ -98,6 +98,5 @@ class MiniWidgetExitTests(unittest.TestCase):
         self.assertEqual(app.global_mouse_listener.stop_count, 1)
         self.assertEqual(app.root.destroy_count, 1)
 
-
 if __name__ == "__main__":
     unittest.main()

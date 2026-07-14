@@ -44,7 +44,6 @@ events.json
 **/study/
 
 # Generated export and distribution archives
-*.zip
 
 # OS and editor files
 .DS_Store

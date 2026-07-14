@@ -1,9 +1,7 @@
 import copy
-import io
 import json
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 from unittest.mock import Mock
 from unittest.mock import patch
@@ -18,11 +16,7 @@ from modules.capture_order import (
     restore_capture_order,
     restore_capture_order_if_confirmed,
 )
-from modules.chatgpt_handoff_exporter import (
-    build_capture_timeline_markdown,
-    build_preview_html,
-    export_chatgpt_handoff_zip,
-)
+from modules.flow_document import build_flow_document
 from modules.storage import write_json_atomic
 
 
@@ -102,7 +96,7 @@ class CaptureOrderTests(unittest.TestCase):
         new_record = app.add_capture_record(new_path)
         self.assertIs(active_ordered_records(app.capture_records)[-1], new_record)
 
-    def test_zip_and_organized_outputs_follow_display_order(self):
+    def test_flow_document_follows_display_order(self):
         records = self.legacy_records()
         normalize_display_orders(records)
         records[0]["display_order"] = 0
@@ -111,21 +105,9 @@ class CaptureOrderTests(unittest.TestCase):
         normalize_display_orders(records)
         expected = ["late", "middle", "early"]
 
-        timeline = build_capture_timeline_markdown(records)
-        preview = build_preview_html(records)
-        self.assertLess(timeline.index("10:03:00"), timeline.index("10:02:00"))
-        self.assertLess(preview.index("late.png"), preview.index("middle.png"))
-
-        zip_path, _ = export_chatgpt_handoff_zip(records, self.root / "exports")
-        with zipfile.ZipFile(zip_path) as archive:
-            timeline_zip = archive.read("CAPTURE_TIMELINE.md").decode("utf-8")
-            self.assertLess(timeline_zip.index("10:03:00"), timeline_zip.index("10:02:00"))
-            colors = []
-            for index in range(1, 4):
-                data = archive.read(f"images/capture_{index:03d}.png")
-                with Image.open(io.BytesIO(data)) as image:
-                    colors.append(image.convert("RGB").getpixel((0, 0)))
-        self.assertEqual(colors, [(255, 0, 0), (0, 128, 0), (0, 0, 255)])
+        document = build_flow_document(records)
+        capture_ids = [section["items"][0]["captureId"] for section in document["sections"]]
+        self.assertEqual(capture_ids, expected)
         self.assertEqual([r["record_id"] for r in active_ordered_records(records)], expected)
 
     def test_reorder_preserves_original_identity_and_capture_metadata(self):

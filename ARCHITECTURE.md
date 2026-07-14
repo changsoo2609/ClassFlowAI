@@ -2,7 +2,7 @@
 
 ## 목적
 
-ClassFlowAI는 Windows 화면 캡처의 원본 촬영 정보를 보존하고, 별도의 사용자 학습 흐름 순서와 OCR 또는 이미지 추론 결과를 기록한 뒤 ChatGPT 전달용 ZIP으로 내보내는 Tkinter 데스크톱 프로그램이다.
+ClassFlowAI는 Windows 화면 캡처의 원본 촬영 정보를 보존하고, 별도의 사용자 학습 흐름 순서와 OCR 또는 이미지 추론 결과를 기록하는 Tkinter 데스크톱 프로그램이다.
 
 현재 구조는 `app.py`가 프로그램 전체 흐름을 조정하고, `_runtime/modules/`의 기능 모듈을 호출하는 형태다. 이 문서는 현재 기준 코드를 설명하며 구조 변경을 제안하거나 반영하지 않는다.
 
@@ -25,14 +25,8 @@ ClassFlowAI/
       ├─ storage.py
       ├─ ocr_engine.py
       ├─ nvidia_cap_reasoner.py
-      ├─ chatgpt_handoff_exporter.py
-      ├─ study_card_spec.py
-      ├─ study_card_validator.py
-      ├─ study_card_importer.py
-      ├─ study_card_review.py
-      ├─ study_review_scheduler.py
-      ├─ study_review_window.py
-      └─ study_answer_evaluator.py
+      ├─ flow_document.py
+      ├─ flow_window.py
 ```
 
 ## 실행 흐름
@@ -63,14 +57,12 @@ ClassFlowAI/
 - CAP 이미지 추론과 수동 결과 복사 흐름 조정
 - 전역 키보드·마우스 단축키 감지
 - Windows 캡처 도구 실행 및 창 표시 상태 관리
-- HTML 흐름 미리보기, 캡처 폴더 열기, GPT 전달 ZIP 생성
-- 현재 수업의 학습카드 가져오기·검토 창 열기
-- 승인된 카드의 오늘 복습 화면과 복습 결과 저장
+- 공통 수업 흐름 결과 창과 캡처 폴더 열기
 - 미니 상태창 우클릭 메뉴와 확인 후 기존 종료 흐름 호출
 - 실행 시간과 상태 메시지 갱신
 - 정상 시작 플래그 및 시작 오류 기록
 
-`app.py`는 외부 API 요청의 세부 구현이나 ZIP 파일 조립 자체를 직접 수행하기보다 해당 모듈을 호출하고 UI에 결과를 반영한다.
+`app.py`는 외부 API 요청의 세부 구현을 직접 수행하기보다 해당 모듈을 호출하고 UI에 결과를 반영한다.
 
 ## 모듈별 책임
 
@@ -114,63 +106,17 @@ ClassFlowAI/
 - 모델 응답 정리와 사용자용 오류 메시지 반환
 - 설정 또는 환경변수에서 API 키 확인
 
-### `modules/chatgpt_handoff_exporter.py`
+### `modules/flow_document.py`
 
-- 활성 캡처의 사용자 학습 흐름 순서 Markdown 생성
-- OCR/CAP 보조 결과 타임라인 생성
-- 이미지가 포함된 HTML 미리보기 생성
-- 이미지와 안내 문서를 모아 ChatGPT 전달용 ZIP 생성
-- 파일명 정규화와 내보내기용 임시 구조 관리
+- OCR 해석 결과와 CAP 결과를 공통 `FlowDocument`/section/item 구조로 정규화
+- `display_order`와 연속된 관련 캡처 그룹을 유지하며 캡처·해설·코드·메모 배치
+- 수업별 `state/flow_document.json` 원자적 저장
 
-### `modules/study_card_spec.py`
+### `modules/flow_window.py`
 
-- GPT 결과물의 `study_cards.json`과 `study_cards.md` 생성 규격 제공
-- 카드 유형, 정답 신뢰도와 근거 이미지 연결 원칙 정의
-
-### `modules/study_card_validator.py`
-
-- `study_cards.json` 최상위 구조와 카드 필드 검증
-- 허용된 유형, 정답 신뢰도, 검토 필요 상태와 난이도 검사
-- 근거 이미지 누락, 질문 길이, 선택지 수와 학습 단위 카드 수 경고
-- 정규화된 질문의 동일·유사 중복 카드 ID 보고
-- 입력 카드의 자동 수정·삭제 없이 검증 보고서만 반환
-
-### `modules/study_card_importer.py`
-
-- JSON 또는 ZIP의 카드를 기존 검증기로 먼저 검사
-- ZIP 전체를 풀지 않고 참조된 근거 이미지만 안전하게 저장
-- 동일 ID, 정규화된 질문·주제, 근거 이미지·카드 유형 순으로 중복 병합
-- 기존 사용자 수정과 검토 상태를 우선 보존하고 충돌 목록을 보고
-- 현재 수업의 `study/cards.json`, `study/imports/`, `study/images/` 관리
-
-### `modules/study_card_review.py`
-
-- 메인 창과 분리된 학습카드 가져오기·검토 창 제공
-- 상태·과목·카드 유형 필터와 카드 상세 편집 제공
-- 승인, 제외, 검토 대기 전환과 근거 이미지 열기 제공
-- 삭제 대신 로컬 검토 상태를 저장해 원본 카드 정보 보존
-
-### `modules/study_review_scheduler.py`
-
-- 승인되고 제외되지 않은 카드 중 현재 시각에 복습할 카드 선택
-- 모름·어려움·보통·쉬움 평가에 따른 결정적 다음 복습일 계산
-- 카드별 `review_state.json` 원자적 저장과 `review_history.jsonl` 이력 추가
-- 카드 본문과 복습 상태를 카드 ID 기준으로 분리해 재가져오기에도 상태 보존
-
-### `modules/study_review_window.py`
-
-- 질문과 선택지를 먼저 보여주고 답 확인 전 정답 영역과 평가 버튼 숨김
-- 답 확인 뒤 사용자 답, 확인된 답, 핵심 요소, 설명, 근거와 신뢰도 표시
-- 파인만 카드의 설명 안내와 `내 설명 다시 작성` 제공
-- 평가 직후 상태와 이력을 저장하고 세션 완료 통계 표시
-
-### `modules/study_answer_evaluator.py`
-
-- 카드 필드와 사용자 답변을 신뢰할 수 없는 데이터 블록으로 분리한 평가 프롬프트 생성
-- NVIDIA CAP 추론 모델을 텍스트 전용으로 호출하고 엄격한 JSON 응답 검증
-- 정답 신뢰도에 따라 확정 판정을 제한하고 참고 경고 추가
-- 추천 등급과 사용자의 최종 등급을 분리해 `answer_evaluations.jsonl`에 기록
-- API 키, 전체 프롬프트와 원본 응답을 평가 이력에 저장하지 않음
+- 캡처 그림과 해설·코드를 분리한 단일 수업 흐름 창 제공
+- 그림 우클릭 시 원본 이미지, 텍스트·코드 우클릭 시 해당 블록 복사
+- 전체 문서 복사 없이 실제 학습 순서와 개별 블록 복사만 제공
 
 ## 주요 데이터 흐름
 
@@ -183,9 +129,10 @@ Windows 캡처 도구
 → ocr_engine.extract_text_from_image
 → OCR 결과 기록 및 화면 표시
 → 텍스트 자동 복사
+→ 수업 흐름 해석 전용 단일 대기열에 등록
+→ 원본 이미지와 OCR 결과를 worker 1개가 순차 해석
 → 필요 시 nvidia_cap_reasoner.correct_ocr_with_image
 → 보정 결과 기록 및 자동 복사
-→ 필요 시 이미지와 보정 OCR 내용 해석
 ```
 
 ### CAP 모드
@@ -201,51 +148,34 @@ Windows 캡처 도구
 → 사용자가 요청할 때만 해석 텍스트 복사
 ```
 
-### GPT 전달 ZIP
+### 공통 수업 흐름과 백그라운드 OCR 해석
 
 ```text
-활성 사용자 정렬 레코드와 원본 이미지(파일명·촬영 정보는 원본 유지)
-→ OCR/CAP 보조 타임라인 재구성
-→ 이미지 우선 해석 안내와 프롬프트 추가
-→ chatgpt_handoff_exporter.export_chatgpt_handoff_zip
-→ 전달용 ZIP 생성
+display_order 기준 활성 캡처 기록
+→ OCR 해석 전에는 상태 안내 텍스트만 표시
+→ 원본 이미지와 OCR의 의미 해석을 단일 worker 대기열에서 실행
+→ 완료되면 수업 흐름의 해설 item만 갱신
+→ 관련 캡처 그룹별 section 구성
+→ state/flow_document.json 저장
+→ 그림/텍스트 블록별 결과 창 렌더링
+→ 우클릭으로 필요한 원본 이미지 또는 텍스트만 복사
 ```
-
-### 학습카드 가져오기와 검토
-
-```text
-ChatGPT 결과의 study_cards.json과 images/
-→ study_card_validator.validate_study_cards_file
-→ 구조 오류·품질 경고·중복 카드 ID·통계 보고
-→ 오류가 없고 경고를 사용자가 확인하면 study_card_importer로 가져오기
-→ 현재 수업의 study/cards.json과 참조된 study/images/에 저장
-→ 학습카드 창에서 수정·승인·제외
-→ 승인 카드 중 due_at이 지난 카드로 오늘의 복습 구성
-→ 사용자 평가 직후 review_state.json과 review_history.jsonl 저장
-→ 선택적으로 AI 설명 점검을 비동기 실행하고 참고 결과 표시
-→ 사용자가 직접 고른 최종 등급과 AI 추천을 분리해 평가 이력 저장
-```
-
-검증기는 입력을 자동 수정하지 않는다. AI 설명 점검은 실험 기능이며 카드, 복습 등급과 다음 복습일을 자동 변경하지 않는다.
 
 ## 설정과 사용자 데이터
 
 - `_runtime/config.json`: API 키, 모델, 프롬프트, 단축키, 저장 위치 등 사용자 설정
 - 저장 위치의 `.classflow_current_lesson.json`: 해당 저장 위치에서 마지막으로 연 수업 폴더
-- 저장 위치의 `lessons/lesson_YYYY-MM-DD_HH-MM-SS/`: 새 수업별 독립 작업 폴더
+- 저장 위치의 `YYYY-MM-DD/HH-MM-SS/`: 새 수업별 독립 작업 폴더
+- 기존 `YYYY-MM-DD/lessons/lesson_YYYY-MM-DD_HH-MM-SS/`: 이동하지 않고 읽기 호환
 - 수업 폴더의 `state/lesson.json`: 새 수업 식별 정보
 - 작업 폴더의 캡처 이미지: 수업 중 생성된 사용자 자료
 - 작업 폴더의 JSON 기록: 캡처 순서, 처리 결과와 상태
-- 수업 폴더의 `study/cards.json`: 가져온 카드, 사용자 수정과 검토 상태
-- 수업 폴더의 `study/imports/`, `study/images/`: 가져오기 이력과 참조 근거 이미지
-- 수업 폴더의 `study/review_state.json`: 카드 ID별 다음 복습일, 간격과 누적 상태
-- 수업 폴더의 `study/review_history.jsonl`: 완료된 복습 평가와 사용자 답변 이력
-- 수업 폴더의 `study/answer_evaluations.jsonl`: AI 참고 평가와 사용자의 최종 등급
+- 수업 폴더의 `state/flow_document.json`: OCR/CAP 공통 수업 흐름
 - 런타임 플래그와 로그: 시작 성공 또는 실패 확인용 파일
 
 위 파일은 소스가 아니며 사용자별 값이나 실행 결과를 포함하므로 Git에서 제외한다.
 
-기존 버전에서 저장 위치 바로 아래에 `captures`, `state`, `outputs`, `logs`가 생성된 경우에는 해당 저장 위치 자체를 기존 수업으로 계속 사용한다. 새 수업부터는 `lessons/` 아래에 독립 폴더를 만들며, 수업을 전환해도 이전 수업의 기록과 이미지는 이동하거나 삭제하지 않는다. OCR/CAP 처리가 진행 중일 때는 완료 콜백이 다른 수업에 저장되는 일을 막기 위해 수업 전환을 허용하지 않는다.
+기존 버전에서 저장 위치 바로 아래에 `captures`, `state`, `outputs`, `logs`가 생성되었거나 `lessons/lesson_날짜_시간` 구조를 사용하는 경우 기존 위치를 그대로 사용한다. 새 수업부터는 `날짜/시간` 아래에 독립 폴더를 만들며, 이전 수업의 기록과 이미지는 이동하거나 삭제하지 않는다. OCR/CAP 처리가 진행 중일 때는 완료 콜백이 다른 수업에 저장되는 일을 막기 위해 수업 전환을 허용하지 않는다.
 
 현재 수업 초기화는 사용자 선택에 따라 레코드만 초기화하거나 `captures/`의 원본 이미지까지 삭제한다. 이미지를 유지하거나 파일 삭제가 실패한 경우에는 최소한의 제외 레코드를 남겨 캡처 파일 정합성 보정이 해당 이미지를 활성 목록에 다시 추가하지 않도록 한다. 기존 OCR/CAP 결과는 제외 레코드에 남기지 않는다.
 
