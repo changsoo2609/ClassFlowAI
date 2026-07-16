@@ -8,6 +8,11 @@ from unittest.mock import Mock, patch
 from PIL import Image
 
 from app import ClassFlowAIApp
+from modules.nvidia_cap_reasoner import (
+    DEFAULT_CAP_PROMPT,
+    DEFAULT_FLOW_INTERPRETATION_PROMPT,
+    build_flow_interpretation_prompt,
+)
 
 
 class FlowBackgroundInterpretationTests(unittest.TestCase):
@@ -49,6 +54,43 @@ class FlowBackgroundInterpretationTests(unittest.TestCase):
         self.assertEqual(self.record["status"], "ocr_done")
         self.assertEqual(self.record["display_result_type"], "ocr")
         self.assertEqual(self.app.flow_interpretation_queue.qsize(), 1)
+
+    def test_background_job_uses_lesson_note_prompt_not_manual_cap_prompt(self):
+        self.assertTrue(self.app.start_flow_interpretation_background(self.record))
+        prompt = self.app.flow_interpretation_queue.get_nowait()["config"]["cap_reasoning_prompt"]
+        self.assertIn("학생이 복습하기 좋은 수업 노트", prompt)
+        self.assertIn("빠르게 추출된 텍스트", prompt)
+        self.assertNotEqual(prompt, self.app.config["cap_reasoning_prompt"])
+        self.assertEqual(DEFAULT_CAP_PROMPT, DEFAULT_FLOW_INTERPRETATION_PROMPT)
+
+    def test_lesson_note_prompt_rejects_report_headings_and_empty_confirmation(self):
+        prompt = build_flow_interpretation_prompt("보조 OCR")
+        for heading in (
+            "화면 해석",
+            "화면 유형",
+            "화면에서 확인되는 근거",
+            "구조 또는 흐름",
+            "학습·활용 포인트",
+            "이미지 분석",
+            "분석 결과",
+            "관찰 내용",
+        ):
+            self.assertIn(heading, prompt)
+        self.assertIn("제목이나 메타 항목으로 출력하지 않는다", prompt)
+        self.assertIn("확인 필요: 없음", prompt)
+        self.assertIn("절대 출력하지 않는다", prompt)
+        self.assertIn("코드 화면", DEFAULT_FLOW_INTERPRETATION_PROMPT)
+        self.assertIn("오류 화면", DEFAULT_FLOW_INTERPRETATION_PROMPT)
+        self.assertIn("표·다이어그램 화면", DEFAULT_FLOW_INTERPRETATION_PROMPT)
+        for capture_rule in (
+            "개념 화면",
+            "처리 흐름 화면",
+            "장단점 화면",
+            "코드 일부가 잘렸거나",
+            "이미지와 OCR이 충돌하면 이미지를 우선",
+            "내용이 짧으면 2~3개 섹션만 사용",
+        ):
+            self.assertIn(capture_rule, DEFAULT_FLOW_INTERPRETATION_PROMPT)
 
     def test_quick_ocr_is_immediately_visible_in_current_result(self):
         self.app.get_current_record = Mock(return_value=self.record)

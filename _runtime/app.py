@@ -23,7 +23,7 @@ except Exception:
 
 from modules.clipboard_watcher import (
     clipboard_sequence_changed,
-    copy_image_to_clipboard,
+    copy_pil_image_to_clipboard,
     get_clipboard_image,
     get_clipboard_sequence_number,
     image_hash,
@@ -57,8 +57,10 @@ from modules.storage import (
 from modules.ocr_engine import extract_text_from_image
 from modules.nvidia_cap_reasoner import (
     analyze_capture_image,
+    build_flow_interpretation_prompt,
     correct_ocr_with_image,
     DEFAULT_CAP_PROMPT,
+    LEGACY_CAP_REPORT_PROMPT,
 )
 
 
@@ -158,7 +160,7 @@ def _write_json_atomic(path: Path, value: dict) -> None:
 
 def load_config() -> dict:
     default_config = {
-        "settings_schema_version": 5,
+        "settings_schema_version": 6,
         "workspace_dir": "",
         "use_daily_folder": True,
         "poll_interval_sec": 1.0,
@@ -327,6 +329,14 @@ def load_config() -> dict:
         migrated["settings_schema_version"] = 5
         migration_needed = True
 
+    if schema_version < 6:
+        saved_cap_prompt = str(user_config.get("cap_reasoning_prompt") or "").strip()
+        if saved_cap_prompt == LEGACY_CAP_REPORT_PROMPT:
+            default_config["cap_reasoning_prompt"] = DEFAULT_CAP_PROMPT
+            migrated["cap_reasoning_prompt"] = DEFAULT_CAP_PROMPT
+        migrated["settings_schema_version"] = 6
+        migration_needed = True
+
     if migration_needed:
         try:
             _write_json_atomic(
@@ -344,7 +354,7 @@ def load_config() -> dict:
 
 def save_config(config: dict) -> None:
     visible = {
-        "settings_schema_version": 5,
+        "settings_schema_version": 6,
         "workspace_dir": config.get("workspace_dir", ""),
         "use_daily_folder": bool(config.get("use_daily_folder", True)),
         "poll_interval_sec": float(config.get("poll_interval_sec", 1.0)),
@@ -424,6 +434,9 @@ class ClassFlowAIApp:
         self.last_mode_toggle_at = 0.0
         self.last_hash = None
         self.last_clipboard_sequence = None
+        self.internal_clipboard_write_lock = threading.Lock()
+        self.internal_clipboard_write_active = False
+        self.ignored_clipboard_sequences = set()
         self.current_preview = None
         self.capture_records: list[dict] = []
         self.current_record_index = -1
@@ -1028,15 +1041,11 @@ class ClassFlowAIApp:
             self.set_status("원본 이미지 파일을 찾을 수 없습니다.")
             return False
 
-        previous_hash = self.last_hash
         try:
             with Image.open(image_path) as image:
-                image.verify()
-            with Image.open(image_path) as image:
-                self.last_hash = image_hash(image.convert("RGB"))
-            copy_image_to_clipboard(image_path, owner_hwnd=self.root.winfo_id())
+                original = image.convert("RGB").copy()
+            self.copy_internal_image_to_clipboard(original)
         except Exception:
-            self.last_hash = previous_hash
             self.set_status("원본 이미지 복사에 실패했습니다.")
             messagebox.showerror(
                 "원본 이미지 복사 실패",
@@ -1599,6 +1608,19 @@ class ClassFlowAIApp:
             try:
                 if not self.paused:
                     sequence = get_clipboard_sequence_number()
+                    suppress_internal = False
+                    with self.internal_clipboard_write_lock:
+                        if self.internal_clipboard_write_active:
+                            if sequence is not None:
+                                self.last_clipboard_sequence = sequence
+                            suppress_internal = True
+                        elif sequence is not None and sequence in self.ignored_clipboard_sequences:
+                            self.ignored_clipboard_sequences.discard(sequence)
+                            self.last_clipboard_sequence = sequence
+                            suppress_internal = True
+                    if suppress_internal:
+                        time.sleep(float(self.config.get("poll_interval_sec", 1.0)))
+                        continue
                     if not clipboard_sequence_changed(self.last_clipboard_sequence, sequence):
                         time.sleep(float(self.config.get("poll_interval_sec", 1.0)))
                         continue
@@ -1606,14 +1628,66 @@ class ClassFlowAIApp:
                         self.last_clipboard_sequence = sequence
                     image = get_clipboard_image()
                     if image is not None:
+                        sequence_after_read = get_clipboard_sequence_number()
                         h = image_hash(image)
-                        if h != self.last_hash:
-                            self.last_hash = h
-                            self.handle_new_clipboard_image(image)
+                        suppress_after_read = False
+                        with self.internal_clipboard_write_lock:
+                            if self.internal_clipboard_write_active:
+                                if sequence_after_read is not None:
+                                    self.last_clipboard_sequence = sequence_after_read
+                                suppress_after_read = True
+                            elif (
+                                sequence_after_read is not None
+                                and sequence_after_read in self.ignored_clipboard_sequences
+                            ):
+                                self.ignored_clipboard_sequences.discard(sequence_after_read)
+                                self.last_clipboard_sequence = sequence_after_read
+                                self.last_hash = h
+                                suppress_after_read = True
+                            elif (
+                                sequence is not None
+                                and sequence_after_read is not None
+                                and sequence_after_read != sequence
+                            ):
+                                # 읽는 동안 다른 클립보드 쓰기가 끝난 경우 다음 반복에서
+                                # 최종 sequence와 이미지를 다시 읽어 정확히 판정한다.
+                                suppress_after_read = True
+                            elif h == self.last_hash:
+                                suppress_after_read = True
+                            else:
+                                self.last_hash = h
+                        if suppress_after_read:
+                            continue
+                        self.handle_new_clipboard_image(image)
                 time.sleep(float(self.config.get("poll_interval_sec", 1.0)))
             except Exception as e:
                 append_event(self.paths["events"], {"type": "clipboard_loop_error", "error": str(e)})
                 time.sleep(1.0)
+
+    def copy_internal_image_to_clipboard(self, image: Image.Image) -> None:
+        """Write an app-owned image once and suppress only that exact clipboard change."""
+        if not isinstance(image, Image.Image):
+            raise TypeError("복사할 이미지가 올바르지 않습니다.")
+        copied_image = image.convert("RGB")
+        copied_hash = image_hash(copied_image)
+        with self.internal_clipboard_write_lock:
+            if self.internal_clipboard_write_active:
+                raise RuntimeError("다른 내부 이미지 복사가 진행 중입니다.")
+            self.internal_clipboard_write_active = True
+        try:
+            copy_pil_image_to_clipboard(
+                copied_image,
+                owner_hwnd=int(self.root.winfo_id()),
+            )
+            sequence = get_clipboard_sequence_number()
+            with self.internal_clipboard_write_lock:
+                if sequence is not None:
+                    self.ignored_clipboard_sequences.add(sequence)
+                    self.last_clipboard_sequence = sequence
+                self.last_hash = copied_hash
+        finally:
+            with self.internal_clipboard_write_lock:
+                self.internal_clipboard_write_active = False
 
     def handle_new_clipboard_image(self, image: Image.Image):
         with self.lesson_switch_lock:
@@ -2071,20 +2145,8 @@ class ClassFlowAIApp:
                 return False
             self.flow_interpretation_pending.add(pending_key)
 
-        base_prompt = str(self.config.get("cap_reasoning_prompt") or DEFAULT_CAP_PROMPT).strip()
-        prompt = (
-            base_prompt
-            + "\n\n수업 흐름 전용 추가 지시:\n"
-            + "- 아래 OCR과 원본 이미지를 함께 보고 학습자가 이해하기 쉬운 해설을 작성하세요.\n"
-            + "- OCR 문장을 그대로 반복하지 말고 개념, 절차, 코드 또는 오류의 의미를 설명하세요.\n"
-            + "- 이미지와 OCR이 충돌하면 이미지를 우선하고 보이지 않는 내용은 추측하지 마세요.\n"
-            + "- 최종 결과만 한국어 Markdown으로 반환하세요.\n\n"
-            + "--- OCR 시작 ---\n"
-            + ocr_text[:16000]
-            + "\n--- OCR 끝 ---\n"
-        )
         inference_config = dict(self.config)
-        inference_config["cap_reasoning_prompt"] = prompt
+        inference_config["cap_reasoning_prompt"] = build_flow_interpretation_prompt(ocr_text)
         record["flow_interpretation_status"] = "queued"
         record.pop("flow_interpretation_error", None)
         self.save_records()
@@ -2321,6 +2383,7 @@ class ClassFlowAIApp:
                 self.paths["flow_document"],
                 self.set_status,
                 lambda event: append_event(self.paths["events"], event),
+                self.copy_internal_image_to_clipboard,
             )
             self.set_status("현재 수업의 수업 흐름 창을 열었습니다.")
         except Exception as e:

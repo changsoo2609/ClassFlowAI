@@ -1,5 +1,6 @@
 import copy
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -69,6 +70,10 @@ class CaptureImageContextMenuTests(unittest.TestCase):
         app = ClassFlowAIApp.__new__(ClassFlowAIApp)
         app.root = _Root()
         app.last_hash = None
+        app.last_clipboard_sequence = None
+        app.internal_clipboard_write_lock = threading.Lock()
+        app.internal_clipboard_write_active = False
+        app.ignored_clipboard_sequences = set()
         app.paths = {"events": Path(self.temp_dir.name) / "events.jsonl"}
         app.set_status = Mock()
         record = {
@@ -89,17 +94,22 @@ class CaptureImageContextMenuTests(unittest.TestCase):
                 app, record = self.make_app(mode)
                 before = copy.deepcopy(record)
                 app.current_preview = object()
-                with patch("app.copy_image_to_clipboard") as copy_image:
+                app.copy_internal_image_to_clipboard = Mock()
+                with patch("app.copy_pil_image_to_clipboard") as copy_image:
                     self.assertTrue(app.copy_record_original_image(record))
-                copy_image.assert_called_once_with(self.image_path, owner_hwnd=123)
+                copy_image.assert_not_called()
+                app.copy_internal_image_to_clipboard.assert_called_once()
+                copied = app.copy_internal_image_to_clipboard.call_args.args[0]
+                self.assertEqual(copied.size, (64, 48))
                 self.assertEqual(record, before)
 
     def test_missing_original_is_safe(self):
         app, record = self.make_app("ocr")
         record["image_path"] = str(Path(self.temp_dir.name) / "missing.png")
-        with patch("app.copy_image_to_clipboard") as copy_image, patch("app.messagebox.showwarning") as warning:
+        app.copy_internal_image_to_clipboard = Mock()
+        with patch("app.messagebox.showwarning") as warning:
             self.assertFalse(app.copy_record_original_image(record))
-        copy_image.assert_not_called()
+        app.copy_internal_image_to_clipboard.assert_not_called()
         warning.assert_called_once()
 
     def test_damaged_original_is_safe(self):
@@ -107,9 +117,10 @@ class CaptureImageContextMenuTests(unittest.TestCase):
         damaged = Path(self.temp_dir.name) / "damaged.png"
         damaged.write_bytes(b"not an image")
         record["image_path"] = str(damaged)
-        with patch("app.copy_image_to_clipboard") as copy_image, patch("app.messagebox.showerror") as error:
+        app.copy_internal_image_to_clipboard = Mock()
+        with patch("app.messagebox.showerror") as error:
             self.assertFalse(app.copy_record_original_image(record))
-        copy_image.assert_not_called()
+        app.copy_internal_image_to_clipboard.assert_not_called()
         error.assert_called_once()
 
     def test_existing_cap_copy_action_reuses_common_copy(self):

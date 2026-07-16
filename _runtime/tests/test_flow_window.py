@@ -1,5 +1,5 @@
-import unittest
 import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -45,61 +45,33 @@ class FlowWindowContextCopyTests(unittest.TestCase):
 
     def test_image_block_copies_original_image_file(self):
         flow = FlowResultWindow.__new__(FlowResultWindow)
-        flow.window = Mock()
-        flow.window.winfo_id.return_value = 321
-        path = Path("원본 캡처.png")
-        with patch("modules.flow_window.copy_image_to_clipboard") as copy_image:
-            flow._copy_image_path(path)
-        copy_image.assert_called_once_with(path, owner_hwnd=321)
-
-    def test_text_block_frame_and_content_both_receive_context_menu(self):
-        flow = FlowResultWindow.__new__(FlowResultWindow)
-        flow._bind_context_menu = Mock()
-        block = Mock()
-        label = Mock()
-        with (
-            patch("modules.flow_window.tk.LabelFrame", return_value=block),
-            patch("modules.flow_window.tk.Label", return_value=label),
-        ):
-            flow._add_text_block(Mock(), "해설")
-        bound_widgets = [call.args[0] for call in flow._bind_context_menu.call_args_list]
-        self.assertIn(block, bound_widgets)
-        self.assertIn(label, bound_widgets)
-
-    def test_image_block_frame_and_preview_both_receive_context_menu(self):
-        flow = FlowResultWindow.__new__(FlowResultWindow)
-        flow._bind_context_menu = Mock()
-        flow._set_preview_placeholder = Mock()
-        flow._image_previews = []
-        block = Mock()
-        preview = Mock()
+        flow.internal_image_copy_callback = Mock()
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "원본.png"
-            Image.new("RGB", (40, 20), "red").save(path)
-            with (
-                patch("modules.flow_window.tk.LabelFrame", return_value=block),
-                patch("modules.flow_window.tk.Canvas", return_value=preview),
-            ):
-                flow._add_image_block(Mock(), path)
-        bound_widgets = [call.args[0] for call in flow._bind_context_menu.call_args_list]
-        self.assertIn(block, bound_widgets)
-        self.assertIn(preview, bound_widgets)
+            path = Path(temp_dir) / "원본 캡처.png"
+            Image.new("RGB", (24, 12), "purple").save(path)
+            flow._copy_image_path(path)
+        copied = flow.internal_image_copy_callback.call_args.args[0]
+        self.assertEqual(copied.size, (24, 12))
 
-    def test_code_uses_text_category_and_copies_only_source(self):
+    def test_context_menu_only_has_separate_image_and_text_copy(self):
         flow = FlowResultWindow.__new__(FlowResultWindow)
-        flow._bind_context_menu = Mock()
-        block = Mock()
-        editor = Mock()
-        with (
-            patch("modules.flow_window.tk.LabelFrame", return_value=block) as label_frame,
-            patch("modules.flow_window.ScrolledText", return_value=editor),
-        ):
-            flow._add_code_block(Mock(), "print('ok')")
-        self.assertEqual(label_frame.call_args.kwargs["text"], "텍스트 · 우클릭하여 복사")
-        callbacks = [call.args[2] for call in flow._bind_context_menu.call_args_list]
-        flow.copy_text_block = Mock()
-        callbacks[-1]()
-        flow.copy_text_block.assert_called_once_with("print('ok')")
+        flow.window = Mock()
+        flow.copy_image_block = Mock()
+        flow.copy_bundle_text = Mock()
+        widget = Mock()
+        menu = Mock()
+        context = {"image_paths": [Path("capture.png")], "text": "해설"}
+        with patch("modules.flow_window.tk.Menu", return_value=menu):
+            flow._bind_bundle_context_menu(widget, context, Path("capture.png"))
+            handler = widget.bind.call_args.args[1]
+            handler(Mock(x_root=10, y_root=20))
+        labels = [call.kwargs.get("label") for call in menu.add_command.call_args_list]
+        self.assertEqual(labels, ["원본 이미지만 복사", "텍스트만 복사"])
+        menu.add_command.call_args_list[0].kwargs["command"]()
+        menu.add_command.call_args_list[1].kwargs["command"]()
+        flow.copy_image_block.assert_called_once_with(Path("capture.png"))
+        flow.copy_bundle_text.assert_called_once_with(context)
+
 
 if __name__ == "__main__":
     unittest.main()

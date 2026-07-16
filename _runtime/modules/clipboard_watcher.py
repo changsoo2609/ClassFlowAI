@@ -157,6 +157,71 @@ def _set_windows_clipboard_dib(dib_data: bytes, owner_hwnd: int | None = None) -
             kernel32.GlobalFree(memory_handle)
 
 
+def _set_windows_clipboard_formats(
+    formats: list[tuple[int, bytes]],
+    owner_hwnd: int | None = None,
+) -> None:
+    """Atomically publish multiple byte payloads to the Windows clipboard."""
+    if not sys.platform.startswith("win"):
+        raise OSError("서식 클립보드 복사는 Windows에서만 지원됩니다.")
+    if not formats or any(not data for _, data in formats):
+        raise ValueError("클립보드에 복사할 데이터가 없습니다.")
+
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
+    allocated: list[tuple[int, int]] = []
+    transferred: set[int] = set()
+    clipboard_open = False
+    try:
+        for clipboard_format, data in formats:
+            memory_handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not memory_handle:
+                raise MemoryError("클립보드 메모리를 할당하지 못했습니다.")
+            allocated.append((clipboard_format, memory_handle))
+            memory_pointer = kernel32.GlobalLock(memory_handle)
+            if not memory_pointer:
+                raise OSError(ctypes.get_last_error(), "클립보드 메모리를 잠그지 못했습니다.")
+            try:
+                ctypes.memmove(memory_pointer, data, len(data))
+            finally:
+                kernel32.GlobalUnlock(memory_handle)
+
+        clipboard_open = open_clipboard_with_retry(user32.OpenClipboard, owner_hwnd)
+        if not clipboard_open:
+            raise OSError(ctypes.get_last_error(), "Windows 클립보드를 열 수 없습니다.")
+        if not user32.EmptyClipboard():
+            raise OSError(ctypes.get_last_error(), "Windows 클립보드를 비울 수 없습니다.")
+        for clipboard_format, memory_handle in allocated:
+            if not user32.SetClipboardData(clipboard_format, memory_handle):
+                raise OSError(ctypes.get_last_error(), "클립보드 서식을 기록하지 못했습니다.")
+            transferred.add(memory_handle)
+    finally:
+        if clipboard_open:
+            user32.CloseClipboard()
+        for _, memory_handle in allocated:
+            if memory_handle not in transferred:
+                kernel32.GlobalFree(memory_handle)
+
+
 def copy_image_to_clipboard(image_path: Path, owner_hwnd: int | None = None) -> None:
     image_path = Path(image_path)
     if not image_path.exists():
@@ -164,3 +229,26 @@ def copy_image_to_clipboard(image_path: Path, owner_hwnd: int | None = None) -> 
     with Image.open(image_path) as image:
         dib_data = image_to_dib_bytes(image)
     _set_windows_clipboard_dib(dib_data, owner_hwnd=owner_hwnd)
+
+
+def copy_pil_image_to_clipboard(image: Image.Image, owner_hwnd: int | None = None) -> None:
+    """Copy one in-memory PNG/DIB payload in a single clipboard transaction."""
+    if not isinstance(image, Image.Image):
+        raise TypeError("클립보드에 복사할 이미지가 올바르지 않습니다.")
+    if not sys.platform.startswith("win"):
+        raise OSError("이미지 클립보드 복사는 Windows에서만 지원됩니다.")
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
+    user32.RegisterClipboardFormatW.restype = ctypes.c_uint
+    png_format = int(user32.RegisterClipboardFormatW("PNG"))
+    if not png_format:
+        raise OSError(ctypes.get_last_error(), "PNG 클립보드 형식을 등록하지 못했습니다.")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    _set_windows_clipboard_formats(
+        [
+            (png_format, buffer.getvalue()),
+            (CF_DIB, image_to_dib_bytes(image)),
+        ],
+        owner_hwnd=owner_hwnd,
+    )
