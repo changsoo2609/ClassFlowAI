@@ -26,8 +26,12 @@ def _record_id(record: dict, index: int) -> str:
     return _text(record.get("record_id")) or f"capture-{index:03d}"
 
 
-def _analysis_text(record: dict) -> str:
-    if _text(record.get("mode")).lower() == "ocr":
+def _is_ocr_record(record: dict) -> bool:
+    return _text(record.get("mode")).lower() == "ocr"
+
+
+def original_analysis_text(record: dict) -> str:
+    if _is_ocr_record(record):
         return _text(
             record.get("flow_interpretation_text")
             or record.get("ocr_interpretation_text")
@@ -35,20 +39,39 @@ def _analysis_text(record: dict) -> str:
     return _text(record.get("cap_text"))
 
 
+def effective_analysis_text(record: dict) -> str:
+    if _is_ocr_record(record):
+        return _text(
+            record.get("flow_interpretation_text_edited")
+            or record.get("flow_interpretation_text")
+            or record.get("ocr_interpretation_text")
+        )
+    return _text(record.get("cap_text_edited") or record.get("cap_text"))
+
+
 def _is_failed_analysis(text: str) -> bool:
     lowered = text.casefold()
     return any(marker in lowered for marker in ("분석 실패", "ocr 실패", "보정 실패", "해석 실패"))
 
 
-def _section_title(record: dict, index: int, analysis: str) -> str:
+def effective_section_title(record: dict) -> str:
     explicit = _text(
-        record.get("flow_title")
+        record.get("flow_title_edited")
+        or record.get("flow_title")
         or record.get("title")
         or record.get("memo")
         or record.get("note")
     )
     if explicit:
         return explicit.splitlines()[0][:80]
+    legacy_title, _body = _split_leading_heading(effective_analysis_text(record))
+    return legacy_title[:80]
+
+
+def _section_title(record: dict, index: int, analysis: str) -> str:
+    explicit = effective_section_title(record)
+    if explicit:
+        return explicit
     legacy_title, _body = _split_leading_heading(analysis)
     return legacy_title[:80] or f"캡처 {index}"
 
@@ -61,6 +84,71 @@ def _split_leading_heading(value: str) -> tuple[str, str]:
     if not match:
         return "", "\n".join(lines).strip()
     return match.group(1).strip(), "\n".join(lines[1:]).strip()
+
+
+def editable_analysis_text(record: dict) -> str:
+    analysis = effective_analysis_text(record)
+    if not _is_ocr_record(record):
+        return analysis
+    legacy_title, body = _split_leading_heading(analysis)
+    title = effective_section_title(record) or legacy_title
+    body = body if legacy_title else analysis
+    return f"## {title}\n{body}".strip() if title else body
+
+
+def is_analysis_edited(record: dict) -> bool:
+    if _is_ocr_record(record):
+        return bool(
+            _text(record.get("flow_title_edited"))
+            or _text(record.get("flow_interpretation_text_edited"))
+        )
+    return bool(_text(record.get("cap_text_edited")))
+
+
+def apply_analysis_edit(record: dict, value: str, edited_at: str | None = None) -> None:
+    text = _text(value)
+    if not text:
+        raise ValueError("수정한 해석 내용을 입력하세요.")
+    if not original_analysis_text(record):
+        raise ValueError("수정할 원본 해석 결과가 없습니다.")
+
+    if _is_ocr_record(record):
+        title, body = _split_leading_heading(text)
+        if title and not body:
+            raise ValueError("제목 아래에 해석 내용을 입력하세요.")
+        if not title:
+            title = effective_section_title(record)
+            body = text
+        if title:
+            record["flow_title_edited"] = title[:80]
+        else:
+            record.pop("flow_title_edited", None)
+        record["flow_interpretation_text_edited"] = body
+    else:
+        record["cap_text_edited"] = text
+
+    record["analysis_edited_at"] = edited_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def restore_analysis_original(record: dict) -> bool:
+    keys = (
+        ("flow_title_edited", "flow_interpretation_text_edited")
+        if _is_ocr_record(record)
+        else ("cap_text_edited",)
+    )
+    changed = any(key in record for key in keys)
+    for key in (*keys, "analysis_edited_at"):
+        record.pop(key, None)
+    return changed
+
+
+def has_editable_analysis(record: dict) -> bool:
+    analysis = original_analysis_text(record)
+    if not analysis or _is_failed_analysis(analysis):
+        return False
+    if _is_ocr_record(record):
+        return _text(record.get("flow_interpretation_status")).lower() == "done"
+    return True
 
 
 def _inline_markdown(value: str) -> str:
@@ -166,7 +254,7 @@ def build_flow_document(records: list[dict], title: str = "수업 흐름") -> di
         capture_id = _record_id(record, index)
         mode = "ocr" if _text(record.get("mode")).lower() == "ocr" else "cap"
         modes.add(mode)
-        analysis = _analysis_text(record)
+        analysis = effective_analysis_text(record)
         _legacy_title, analysis_body = _split_leading_heading(analysis)
         group_id = _text(
             record.get("group_id")

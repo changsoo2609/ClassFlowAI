@@ -400,12 +400,31 @@ class FlowBackgroundInterpretationTests(unittest.TestCase):
         self.assertEqual(context["title"], "CAP 제목")
         self.assertEqual(context["group_id"], "cap-group")
 
+    def test_edited_result_is_used_as_previous_context(self):
+        previous = {
+            "record_id": "edited-previous",
+            "mode": "ocr",
+            "flow_title": "원본 제목",
+            "flow_title_edited": "수정 제목",
+            "flow_interpretation_text": "원본 설명",
+            "flow_interpretation_text_edited": "수정 설명",
+            "flow_interpretation_status": "done",
+        }
+
+        context = self.app._flow_previous_context(previous)
+
+        self.assertEqual(context["title"], "수정 제목")
+        self.assertEqual(context["summary"], "수정 설명")
+
     @patch("app.append_event")
     def test_ocr_rerun_clears_all_previous_flow_fields(self, _append_event):
         self.record.update({
             "flow_title": "이전 제목",
+            "flow_title_edited": "이전 수정 제목",
             "flow_interpretation_text": "이전 본문",
+            "flow_interpretation_text_edited": "이전 수정 본문",
             "ocr_interpretation_text": "이전 본문",
+            "analysis_edited_at": "2026-07-27 15:00:00",
             "flow_continues_previous": True,
             "flow_review_required": ["확인"],
             "flow_interpretation_parse_fallback": True,
@@ -420,7 +439,9 @@ class FlowBackgroundInterpretationTests(unittest.TestCase):
         self.app.start_flow_interpretation_background = Mock(return_value=True)
         self.app._after_ocr_record(self.record, "새 OCR", auto_copy=False)
         for key in (
-            "flow_title", "flow_interpretation_text", "ocr_interpretation_text",
+            "flow_title", "flow_title_edited",
+            "flow_interpretation_text", "flow_interpretation_text_edited",
+            "ocr_interpretation_text", "analysis_edited_at",
             "flow_continues_previous", "flow_review_required",
             "flow_interpretation_parse_fallback", "flow_interpretation_error",
             "group_id",
@@ -448,8 +469,11 @@ class FlowBackgroundInterpretationTests(unittest.TestCase):
     def test_ocr_correction_clears_previous_flow_fields_before_requeue(self, _append_event):
         self.record.update({
             "flow_title": "이전 제목",
+            "flow_title_edited": "이전 수정 제목",
             "flow_interpretation_text": "이전 본문",
+            "flow_interpretation_text_edited": "이전 수정 본문",
             "ocr_interpretation_text": "이전 본문",
+            "analysis_edited_at": "2026-07-27 15:00:00",
             "flow_continues_previous": True,
             "flow_review_required": ["확인"],
             "flow_interpretation_parse_fallback": True,
@@ -465,7 +489,9 @@ class FlowBackgroundInterpretationTests(unittest.TestCase):
         self.app.start_flow_interpretation_background = Mock(return_value=True)
         self.app._after_ocr_correction(self.record, "보정된 OCR")
         for key in (
-            "flow_title", "flow_interpretation_text", "ocr_interpretation_text",
+            "flow_title", "flow_title_edited",
+            "flow_interpretation_text", "flow_interpretation_text_edited",
+            "ocr_interpretation_text", "analysis_edited_at",
             "flow_continues_previous", "flow_review_required",
             "flow_interpretation_parse_fallback", "flow_interpretation_error",
             "group_id", "flow_interpretation_status",

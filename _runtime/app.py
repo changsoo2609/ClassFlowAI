@@ -38,7 +38,14 @@ from modules.capture_order import (
 )
 from modules.capture_deletion import delete_capture_files
 from modules.flow_document import (
+    apply_analysis_edit,
     build_flow_document,
+    editable_analysis_text,
+    effective_analysis_text,
+    effective_section_title,
+    has_editable_analysis,
+    is_analysis_edited,
+    restore_analysis_original,
     save_flow_document,
 )
 from modules.flow_window import open_flow_result_window
@@ -691,6 +698,16 @@ class ClassFlowAIApp:
         )
         self.cap_copy_button.pack(side="left", padx=(8, 0))
 
+        self.result_edit_button = tk.Button(
+            result_actions,
+            text="결과 수정",
+            command=self.open_current_result_editor,
+            width=14,
+            height=2,
+            state="disabled",
+        )
+        self.result_edit_button.pack(side="left", padx=(8, 0))
+
 
     def format_execution_seconds(self, seconds) -> str:
         try:
@@ -854,10 +871,7 @@ class ClassFlowAIApp:
         ).lower()
 
         if display_type == "ocr_interpretation":
-            interpretation = str(
-                record.get("ocr_interpretation_text")
-                or ""
-            ).strip()
+            interpretation = effective_analysis_text(record)
             if interpretation:
                 return interpretation
 
@@ -869,7 +883,7 @@ class ClassFlowAIApp:
                 or ""
             ).strip()
 
-        return str(record.get("cap_text") or "").strip()
+        return effective_analysis_text(record)
 
 
     def get_ocr_panel_text(self) -> str:
@@ -939,6 +953,17 @@ class ClassFlowAIApp:
                 # 수업 흐름 해석은 OCR 완료 후 백그라운드에서 자동 실행된다.
                 # 별도의 수동 실행 버튼은 노출하지 않는다.
                 self.cap_copy_button.pack_forget()
+                if hasattr(self, "result_edit_button"):
+                    if has_editable_analysis(record):
+                        if not self.result_edit_button.winfo_manager():
+                            self.result_edit_button.pack(side="left", padx=(8, 0))
+                        self.result_edit_button.config(
+                            state="normal",
+                            text="결과 다시 수정" if is_analysis_edited(record) else "결과 수정",
+                            command=self.open_current_result_editor,
+                        )
+                    else:
+                        self.result_edit_button.pack_forget()
             except Exception:
                 pass
             return
@@ -948,6 +973,8 @@ class ClassFlowAIApp:
                 self.ocr_refine_button.pack(side="left")
             if not self.cap_copy_button.winfo_manager():
                 self.cap_copy_button.pack(side="left", padx=(8, 0))
+            if hasattr(self, "result_edit_button") and not self.result_edit_button.winfo_manager():
+                self.result_edit_button.pack(side="left", padx=(8, 0))
         except Exception:
             pass
 
@@ -959,7 +986,7 @@ class ClassFlowAIApp:
         second_command = self.copy_current_cap_result
 
         status = str(record.get("status") or "")
-        cap_text = str(record.get("cap_text") or "").strip()
+        cap_text = effective_analysis_text(record)
         image_path = Path(str(record.get("image_path") or ""))
         if image_path.exists():
             refine_state = "normal"
@@ -983,6 +1010,12 @@ class ClassFlowAIApp:
                 text=second_text,
                 command=second_command,
             )
+            if hasattr(self, "result_edit_button"):
+                self.result_edit_button.config(
+                    state="normal" if has_editable_analysis(record) else "disabled",
+                    text="결과 다시 수정" if is_analysis_edited(record) else "결과 수정",
+                    command=self.open_current_result_editor,
+                )
         except Exception:
             pass
 
@@ -1035,6 +1068,120 @@ class ClassFlowAIApp:
 
         return "break"
 
+    @staticmethod
+    def _analysis_edit_snapshot(record: dict) -> dict:
+        keys = (
+            "cap_text_edited",
+            "flow_title_edited",
+            "flow_interpretation_text_edited",
+            "analysis_edited_at",
+        )
+        return {key: record[key] for key in keys if key in record}
+
+    @staticmethod
+    def _restore_analysis_edit_snapshot(record: dict, snapshot: dict) -> None:
+        for key in (
+            "cap_text_edited",
+            "flow_title_edited",
+            "flow_interpretation_text_edited",
+            "analysis_edited_at",
+        ):
+            record.pop(key, None)
+        record.update(snapshot)
+
+    def _refresh_after_analysis_edit(self, status_message: str) -> None:
+        self.rebuild_outputs_from_records(save_records=False)
+        self.refresh_current_preview()
+        self.update_ocr_panel()
+        self.update_result_action_buttons()
+        self.set_status(status_message)
+
+    def save_record_analysis_edit(self, record: dict, text: str) -> bool:
+        snapshot = self._analysis_edit_snapshot(record)
+        try:
+            apply_analysis_edit(record, text)
+            self.save_records()
+        except Exception as exc:
+            self._restore_analysis_edit_snapshot(record, snapshot)
+            messagebox.showerror(
+                "결과 수정 저장 실패",
+                f"수정한 해석 결과를 저장하지 못했습니다.\n기존 결과는 변경되지 않았습니다.\n\n{exc}",
+            )
+            self.set_status("수정한 해석 결과를 저장하지 못했습니다.")
+            return False
+
+        self._refresh_after_analysis_edit("수정한 해석 결과를 저장했습니다.")
+        return True
+
+    def restore_record_analysis_edit(self, record: dict) -> bool:
+        snapshot = self._analysis_edit_snapshot(record)
+        if not restore_analysis_original(record):
+            return False
+        try:
+            self.save_records()
+        except Exception as exc:
+            self._restore_analysis_edit_snapshot(record, snapshot)
+            messagebox.showerror(
+                "원본 결과 복원 실패",
+                f"원본 해석 결과로 복원하지 못했습니다.\n기존 수정 내용은 유지됩니다.\n\n{exc}",
+            )
+            self.set_status("원본 해석 결과로 복원하지 못했습니다.")
+            return False
+
+        self._refresh_after_analysis_edit("원본 해석 결과로 복원했습니다.")
+        return True
+
+    def open_current_result_editor(self):
+        record = self.get_current_record()
+        if record is None or not has_editable_analysis(record):
+            self.set_status("수정할 해석 결과가 없습니다.")
+            return
+
+        is_ocr = str(record.get("mode") or "").lower() == "ocr"
+        dialog = tk.Toplevel(self.root)
+        dialog.title("수업 흐름 해석 수정" if is_ocr else "CAP 해석 결과 수정")
+        dialog.geometry("760x560")
+        dialog.minsize(560, 380)
+        dialog.transient(self.root)
+
+        notice = (
+            "모델의 원본 결과는 보존됩니다. 저장한 수정 내용이 화면, 복사 및 수업 흐름에 사용됩니다."
+        )
+        tk.Label(dialog, text=notice, anchor="w", justify="left").pack(
+            fill="x", padx=12, pady=(12, 6)
+        )
+        editor = ScrolledText(dialog, wrap="word", undo=True)
+        editor.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        editor.insert("1.0", editable_analysis_text(record))
+
+        buttons = tk.Frame(dialog)
+        buttons.pack(fill="x", padx=12, pady=(0, 12))
+
+        def save_and_close():
+            if self.save_record_analysis_edit(record, editor.get("1.0", "end-1c")):
+                dialog.destroy()
+
+        def restore_and_close():
+            if not is_analysis_edited(record):
+                messagebox.showinfo("원본 결과 복원", "현재 저장된 수정 내용이 없습니다.", parent=dialog)
+                return
+            confirmed = messagebox.askyesno(
+                "원본 결과로 복원",
+                "수정한 내용만 제거하고 모델의 원본 해석 결과로 복원합니다.\n이미지와 캡처 기록은 변경되지 않습니다. 계속할까요?",
+                parent=dialog,
+            )
+            if confirmed and self.restore_record_analysis_edit(record):
+                dialog.destroy()
+
+        tk.Button(buttons, text="저장", width=12, command=save_and_close).pack(side="right")
+        tk.Button(buttons, text="취소", width=12, command=dialog.destroy).pack(
+            side="right", padx=(0, 8)
+        )
+        tk.Button(buttons, text="원본으로 복원", width=14, command=restore_and_close).pack(side="left")
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.grab_set()
+        editor.focus_set()
+
     def copy_current_cap_result(self):
         record = self.get_current_record()
         if record is None:
@@ -1052,10 +1199,7 @@ class ClassFlowAIApp:
             )
             return
 
-        cap_text = str(
-            record.get("cap_text")
-            or ""
-        ).strip()
+        cap_text = effective_analysis_text(record)
 
         if (
             not cap_text
@@ -1208,8 +1352,11 @@ class ClassFlowAIApp:
             flow_was_pending = record.get("flow_interpretation_status") in {"queued", "running"}
             for key in [
                 "flow_title",
+                "flow_title_edited",
                 "flow_interpretation_text",
+                "flow_interpretation_text_edited",
                 "ocr_interpretation_text",
+                "analysis_edited_at",
                 "flow_continues_previous",
                 "flow_review_required",
                 "flow_interpretation_parse_fallback",
@@ -2129,8 +2276,11 @@ class ClassFlowAIApp:
             "ocr_correction_error",
             "ocr_correction_elapsed_sec",
             "flow_title",
+            "flow_title_edited",
             "flow_interpretation_text",
+            "flow_interpretation_text_edited",
             "ocr_interpretation_text",
+            "analysis_edited_at",
             "flow_continues_previous",
             "flow_review_required",
             "flow_interpretation_parse_fallback",
@@ -2248,24 +2398,14 @@ class ClassFlowAIApp:
             flow_status = str(record.get("flow_interpretation_status") or "").lower()
             if flow_status in {"queued", "running", "failed", "waiting_for_api_key"}:
                 return None
-            summary = str(
-                record.get("flow_interpretation_text")
-                or record.get("ocr_interpretation_text")
-                or ""
-            ).strip()
+            summary = effective_analysis_text(record)
         else:
-            summary = str(record.get("cap_text") or "").strip()
+            summary = effective_analysis_text(record)
             if not summary or summary.startswith("CAP 분석 실패"):
                 return None
         if not summary:
             return None
-        title = str(
-            record.get("flow_title")
-            or record.get("title")
-            or record.get("memo")
-            or record.get("note")
-            or ""
-        ).strip()
+        title = effective_section_title(record)
         if not title:
             first_line = next((line for line in summary.splitlines() if line.strip()), "")
             title = first_line.strip().lstrip("#").strip()[:80]
@@ -2439,6 +2579,12 @@ class ClassFlowAIApp:
             else:
                 group_id = str(record.get("record_id") or "").strip()
             body = str(parsed["body_markdown"]).strip()
+            for key in (
+                "flow_title_edited",
+                "flow_interpretation_text_edited",
+                "analysis_edited_at",
+            ):
+                record.pop(key, None)
             record["flow_interpretation_status"] = "done"
             record["flow_title"] = str(parsed["title"]).strip()
             record["flow_interpretation_text"] = body
@@ -2534,6 +2680,8 @@ class ClassFlowAIApp:
         result_text = str(result_text or "").strip()
         failed = result_text.startswith("CAP 분석 실패")
 
+        record.pop("cap_text_edited", None)
+        record.pop("analysis_edited_at", None)
         record["cap_text"] = result_text
         record["cap_model"] = str(
             self.config.get("cap_reasoning_model")
