@@ -934,12 +934,17 @@ class ClassFlowAIApp:
         if mode == "ocr":
             status = str(record.get("status") or "")
             ocr_text = str(record.get("ocr_text") or "").strip()
+            correction_failed = bool(str(record.get("ocr_correction_error") or "").strip())
             refine_state = "disabled"
-            refine_text = "OCR 보정 후 복사"
+            refine_text = "정확한 복사"
             if status == "ocr_correction_running":
-                refine_text = "OCR 보정 중…"
+                refine_text = "정확한 OCR 처리 중…"
+            elif correction_failed:
+                refine_text = "다시 시도"
             elif ocr_text and not ocr_text.lstrip().startswith("## OCR 실패"):
                 refine_state = "normal"
+                if record.get("ocr_corrected_text"):
+                    refine_text = "정확한 복사 다시 실행"
             try:
                 if not self.ocr_refine_button.winfo_manager():
                     self.ocr_refine_button.pack(side="right")
@@ -950,9 +955,16 @@ class ClassFlowAIApp:
                     text=refine_text,
                     command=self.refine_current_ocr_and_copy,
                 )
-                # 수업 흐름 해석은 OCR 완료 후 백그라운드에서 자동 실행된다.
-                # 별도의 수동 실행 버튼은 노출하지 않는다.
-                self.cap_copy_button.pack_forget()
+                if correction_failed and ocr_text and not ocr_text.lstrip().startswith("## OCR 실패"):
+                    if not self.cap_copy_button.winfo_manager():
+                        self.cap_copy_button.pack(side="left", padx=(8, 0))
+                    self.cap_copy_button.config(
+                        state="normal",
+                        text="OCR 원문 복사",
+                        command=self.copy_current_ocr_to_clipboard,
+                    )
+                else:
+                    self.cap_copy_button.pack_forget()
                 if hasattr(self, "result_edit_button"):
                     if has_editable_analysis(record):
                         if not self.result_edit_button.winfo_manager():
@@ -1287,13 +1299,20 @@ class ClassFlowAIApp:
             self.set_status("OCR 모드로 생성된 캡처에서만 보정할 수 있습니다.")
             return
 
+        self.run_ocr_correction_for_record_async(record, auto_copy=True)
+
+    def run_ocr_correction_for_record_async(self, record: dict, auto_copy: bool = True) -> bool:
+        if str(record.get("status") or "") == "ocr_correction_running":
+            self.set_status("OCR 정확도 보정이 이미 진행 중입니다.")
+            return False
+
         image_path = Path(str(record.get("image_path") or ""))
         if not image_path.exists():
             messagebox.showwarning(
                 "OCR 보정 불가",
                 f"원본 이미지를 찾을 수 없습니다.\n\n{image_path}",
             )
-            return
+            return False
 
         ocr_text = str(record.get("ocr_text") or "").strip()
         if not ocr_text or ocr_text.lstrip().startswith("## OCR 실패"):
@@ -1301,14 +1320,14 @@ class ClassFlowAIApp:
                 "OCR 보정 불가",
                 "현재 캡처에 정상 OCR 결과가 없습니다.",
             )
-            return
+            return False
 
         if not self.has_nvidia_api_key():
             messagebox.showwarning(
                 "OCR 보정 불가",
                 "NVIDIA API 키가 없습니다.\n\n설정에서 API 키를 입력하세요.",
             )
-            return
+            return False
 
         record["status"] = "ocr_correction_running"
         self.processing_state = "OCR 보정 중"
@@ -1333,13 +1352,18 @@ class ClassFlowAIApp:
 
             self.root.after(
                 0,
-                lambda: self._after_ocr_correction(record, corrected),
+                lambda: self._after_ocr_correction(
+                    record,
+                    corrected,
+                    auto_copy=auto_copy,
+                ),
             )
 
         threading.Thread(target=worker, daemon=True).start()
+        return True
 
 
-    def _after_ocr_correction(self, record: dict, corrected_text: str):
+    def _after_ocr_correction(self, record: dict, corrected_text: str, auto_copy: bool = True):
         corrected_text = str(corrected_text or "").strip()
         failed = corrected_text.startswith("OCR 보정 실패")
         elapsed = self.stop_execution_timer(record, save_result=True)
@@ -1404,20 +1428,27 @@ class ClassFlowAIApp:
 
         if failed:
             self.set_status(
-                f"OCR 보정 실패 ({elapsed_text}). 기존 OCR 결과는 유지했습니다."
+                f"정확한 OCR 복사 실패 ({elapsed_text}). OCR 원문은 결과창에 유지했습니다."
             )
             messagebox.showerror(
-                "OCR 보정 실패",
-                corrected_text,
+                "정확한 OCR 복사 실패",
+                "OCR 결과를 정확하게 보정하지 못했습니다.\n"
+                "원문은 자동 복사하지 않았습니다.\n\n"
+                "[다시 시도] 또는 [OCR 원문 복사]를 사용할 수 있습니다.",
             )
+            self.start_flow_interpretation_background(record)
             return
 
-        copied = self.copy_text_to_clipboard(corrected_text)
-        self.set_status(
-            f"OCR 보정 완료 ({elapsed_text}) + 클립보드 복사 완료"
-            if copied
-            else f"OCR 보정 완료 ({elapsed_text}), 복사 실패"
-        )
+        should_copy = auto_copy and bool(self.config.get("copy_ocr_to_clipboard_on_done", True))
+        if should_copy:
+            copied = self.copy_text_to_clipboard(corrected_text)
+            self.set_status(
+                f"정확한 OCR 완료 ({elapsed_text}) + 클립보드 복사 완료"
+                if copied
+                else f"정확한 OCR 완료 ({elapsed_text}), 복사 실패"
+            )
+        else:
+            self.set_status(f"정확한 OCR 보정 완료 ({elapsed_text})")
         if not record.get("flow_interpretation_requeue"):
             self.start_flow_interpretation_background(record, force=True)
 
@@ -2218,9 +2249,17 @@ class ClassFlowAIApp:
 
         existing = str(record.get("ocr_text") or "").strip()
         if existing and not force and not existing.lstrip().startswith("## OCR 실패"):
-            if auto_copy:
-                self.copy_text_to_clipboard(existing)
-                self.set_status("이미 저장된 OCR 텍스트를 클립보드에 복사했습니다.")
+            should_copy = auto_copy and bool(self.config.get("copy_ocr_to_clipboard_on_done", True))
+            corrected = str(record.get("ocr_corrected_text") or "").strip()
+            if should_copy and corrected:
+                copied = self.copy_text_to_clipboard(corrected)
+                self.set_status(
+                    "저장된 정확한 OCR 텍스트를 클립보드에 복사했습니다."
+                    if copied
+                    else "저장된 정확한 OCR 텍스트 복사에 실패했습니다."
+                )
+            elif should_copy:
+                self.run_ocr_correction_for_record_async(record, auto_copy=True)
             return
 
         def worker():
@@ -2325,22 +2364,19 @@ class ClassFlowAIApp:
             self.set_status(f"OCR 실패 ({self.format_execution_seconds(elapsed)}): 설정/API 키 또는 OCR 응답을 확인하세요.")
             return
 
-        # 빠른 OCR 결과는 즉시 사용할 수 있게 두고, 수업 흐름용 의미 해석은
-        # 별도 작업에서 진행한다. 이 작업은 현재 결과 패널이나 클립보드를 바꾸지 않는다.
+        # 원문은 즉시 화면에 표시하되 클립보드에는 넣지 않는다. 자동 복사가
+        # 요청된 경우 이미지 기반 보정을 마친 최종 텍스트만 한 번 복사한다.
+        should_copy = auto_copy and bool(self.config.get("copy_ocr_to_clipboard_on_done", True))
+        if should_copy:
+            if self.run_ocr_correction_for_record_async(record, auto_copy=True):
+                return
+            self.set_status("OCR 원문은 저장했지만 정확한 복사를 시작하지 못했습니다.")
+            return
+
         interpretation_started = bool(record.get("flow_interpretation_requeue"))
         if not interpretation_started:
             interpretation_started = self.start_flow_interpretation_background(record)
-        background_suffix = " · 수업 흐름 해석은 백그라운드 진행" if interpretation_started else ""
-
-        if auto_copy and bool(self.config.get("copy_ocr_to_clipboard_on_done", True)):
-            copied = self.copy_text_to_clipboard(cleaned_text)
-            elapsed_text = self.format_execution_seconds(elapsed)
-            self.set_status(
-                f"OCR 완료 ({elapsed_text}) + 클립보드 복사 완료{background_suffix}"
-                if copied
-                else f"OCR 완료 ({elapsed_text}), 복사 실패{background_suffix}"
-            )
-        elif interpretation_started:
+        if interpretation_started:
             self.set_status(
                 f"OCR 완료 ({self.format_execution_seconds(elapsed)}) · 수업 흐름 해석은 백그라운드 진행"
             )

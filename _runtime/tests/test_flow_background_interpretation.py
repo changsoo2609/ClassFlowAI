@@ -521,7 +521,7 @@ class FlowBackgroundInterpretationTests(unittest.TestCase):
         self.app.ocr_refine_button.config.assert_called_once()
         self.assertEqual(
             self.app.ocr_refine_button.config.call_args.kwargs["text"],
-            "OCR 보정 후 복사",
+            "정확한 복사",
         )
         self.app.cap_copy_button.config.assert_not_called()
         self.app.cap_copy_button.pack_forget.assert_called_once_with()
