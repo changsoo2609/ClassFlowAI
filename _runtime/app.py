@@ -59,12 +59,17 @@ from modules.nvidia_cap_reasoner import (
     analyze_capture_image,
     build_flow_interpretation_prompt,
     correct_ocr_with_image,
+    DEFAULT_CAP_MODEL,
     DEFAULT_CAP_PROMPT,
     LEGACY_CAP_REPORT_PROMPT,
+    LEGACY_SHARED_CAP_PROMPT,
+    parse_flow_interpretation_result,
+    RETIRED_QWEN_CAP_MODEL,
 )
 
 
 BASE_DIR = Path(__file__).resolve().parent
+SETTINGS_SCHEMA_VERSION = 10
 CONFIG_PATH = BASE_DIR / "config.json"  # 배포 기본값: 읽기 전용으로 취급
 LEGACY_CONFIG_LOCAL_PATH = BASE_DIR / "config.local.json"
 
@@ -160,7 +165,7 @@ def _write_json_atomic(path: Path, value: dict) -> None:
 
 def load_config() -> dict:
     default_config = {
-        "settings_schema_version": 6,
+        "settings_schema_version": SETTINGS_SCHEMA_VERSION,
         "workspace_dir": "",
         "use_daily_folder": True,
         "poll_interval_sec": 1.0,
@@ -192,8 +197,8 @@ def load_config() -> dict:
         "ocr_preprocess_mode": "sharp_gray",
         "ocr_post_cleanup_enabled": True,
         "copy_ocr_to_clipboard_on_done": True,
-        "cap_reasoning_model": "qwen/qwen3.5-397b-a17b",
-        "cap_reasoning_model_url": "https://build.nvidia.com/qwen/qwen3.5-397b-a17b",
+        "cap_reasoning_model": DEFAULT_CAP_MODEL,
+        "cap_reasoning_model_url": f"https://build.nvidia.com/{DEFAULT_CAP_MODEL}",
         "cap_reasoning_prompt": DEFAULT_CAP_PROMPT,
         "cap_reasoning_api_base": "https://integrate.api.nvidia.com/v1/chat/completions",
         "cap_reasoning_connect_timeout_sec": 15,
@@ -285,7 +290,7 @@ def load_config() -> dict:
 
         # 모델은 배포 기본값으로 1회 초기화합니다.
         default_ocr_model = "nvidia/nemotron-ocr-v2"
-        default_cap_model = "qwen/qwen3.5-397b-a17b"
+        default_cap_model = DEFAULT_CAP_MODEL
 
         default_config["nvidia_ocr_model"] = default_ocr_model
         default_config["nvidia_model_url"] = (
@@ -330,11 +335,59 @@ def load_config() -> dict:
         migration_needed = True
 
     if schema_version < 6:
-        saved_cap_prompt = str(user_config.get("cap_reasoning_prompt") or "").strip()
-        if saved_cap_prompt == LEGACY_CAP_REPORT_PROMPT:
+        migrated["settings_schema_version"] = 6
+        migration_needed = True
+
+    if schema_version < 7:
+        saved_cap_prompt = str(user_config.get("cap_reasoning_prompt") or "")
+        if not saved_cap_prompt.strip() or saved_cap_prompt in {
+            LEGACY_CAP_REPORT_PROMPT,
+            LEGACY_SHARED_CAP_PROMPT,
+        }:
             default_config["cap_reasoning_prompt"] = DEFAULT_CAP_PROMPT
             migrated["cap_reasoning_prompt"] = DEFAULT_CAP_PROMPT
-        migrated["settings_schema_version"] = 6
+        migrated["settings_schema_version"] = 7
+        migration_needed = True
+
+    if schema_version < 8:
+        migrated["settings_schema_version"] = 8
+        migration_needed = True
+
+    if schema_version < 9:
+        saved_cap_model_value = user_config.get("cap_reasoning_model")
+        saved_cap_model = (
+            "" if saved_cap_model_value is None else str(saved_cap_model_value)
+        )
+        if not saved_cap_model.strip():
+            default_config["cap_reasoning_model"] = DEFAULT_CAP_MODEL
+            default_config["cap_reasoning_model_url"] = (
+                f"https://build.nvidia.com/{DEFAULT_CAP_MODEL}"
+            )
+            migrated["cap_reasoning_model"] = DEFAULT_CAP_MODEL
+            migrated["cap_reasoning_model_url"] = (
+                f"https://build.nvidia.com/{DEFAULT_CAP_MODEL}"
+            )
+        migrated["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
+        migration_needed = True
+
+    if schema_version < 10:
+        saved_cap_model_value = user_config.get("cap_reasoning_model")
+        saved_cap_model = (
+            "" if saved_cap_model_value is None else str(saved_cap_model_value)
+        )
+        if (
+            not saved_cap_model.strip()
+            or saved_cap_model.strip() == RETIRED_QWEN_CAP_MODEL
+        ):
+            default_config["cap_reasoning_model"] = DEFAULT_CAP_MODEL
+            default_config["cap_reasoning_model_url"] = (
+                f"https://build.nvidia.com/{DEFAULT_CAP_MODEL}"
+            )
+            migrated["cap_reasoning_model"] = DEFAULT_CAP_MODEL
+            migrated["cap_reasoning_model_url"] = (
+                f"https://build.nvidia.com/{DEFAULT_CAP_MODEL}"
+            )
+        migrated["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
         migration_needed = True
 
     if migration_needed:
@@ -346,15 +399,24 @@ def load_config() -> dict:
         except Exception:
             pass
 
+    if schema_version < SETTINGS_SCHEMA_VERSION:
+        default_config["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
+
     if not str(default_config.get("cap_reasoning_prompt") or "").strip():
         default_config["cap_reasoning_prompt"] = DEFAULT_CAP_PROMPT
+
+    if not str(default_config.get("cap_reasoning_model") or "").strip():
+        default_config["cap_reasoning_model"] = DEFAULT_CAP_MODEL
+        default_config["cap_reasoning_model_url"] = (
+            f"https://build.nvidia.com/{DEFAULT_CAP_MODEL}"
+        )
 
     return default_config
 
 
 def save_config(config: dict) -> None:
     visible = {
-        "settings_schema_version": 6,
+        "settings_schema_version": SETTINGS_SCHEMA_VERSION,
         "workspace_dir": config.get("workspace_dir", ""),
         "use_daily_folder": bool(config.get("use_daily_folder", True)),
         "poll_interval_sec": float(config.get("poll_interval_sec", 1.0)),
@@ -385,8 +447,8 @@ def save_config(config: dict) -> None:
         "ocr_image_format": str(config.get("ocr_image_format", "png")),
         "ocr_preprocess_mode": str(config.get("ocr_preprocess_mode", "sharp_gray")),
         "ocr_post_cleanup_enabled": bool(config.get("ocr_post_cleanup_enabled", True)),
-        "cap_reasoning_model": str(config.get("cap_reasoning_model", "qwen/qwen3.5-397b-a17b")),
-        "cap_reasoning_model_url": str(config.get("cap_reasoning_model_url", "https://build.nvidia.com/qwen/qwen3.5-397b-a17b")),
+        "cap_reasoning_model": str(config.get("cap_reasoning_model", DEFAULT_CAP_MODEL)),
+        "cap_reasoning_model_url": str(config.get("cap_reasoning_model_url", f"https://build.nvidia.com/{DEFAULT_CAP_MODEL}")),
         "cap_reasoning_prompt": str(config.get("cap_reasoning_prompt", DEFAULT_CAP_PROMPT)),
         "cap_reasoning_api_base": str(config.get("cap_reasoning_api_base", "https://integrate.api.nvidia.com/v1/chat/completions")),
         "cap_reasoning_connect_timeout_sec": int(config.get("cap_reasoning_connect_timeout_sec", 15) or 15),
@@ -1145,9 +1207,15 @@ class ClassFlowAIApp:
         else:
             flow_was_pending = record.get("flow_interpretation_status") in {"queued", "running"}
             for key in [
+                "flow_title",
+                "flow_interpretation_text",
                 "ocr_interpretation_text",
+                "flow_continues_previous",
+                "flow_review_required",
+                "flow_interpretation_parse_fallback",
                 "ocr_interpretation_error",
                 "flow_interpretation_error",
+                "group_id",
             ]:
                 record.pop(key, None)
 
@@ -1159,7 +1227,7 @@ class ClassFlowAIApp:
             record["ocr_corrected_text"] = corrected_text
             record["ocr_correction_model"] = str(
                 self.config.get("cap_reasoning_model")
-                or "qwen/qwen3.5-397b-a17b"
+                or DEFAULT_CAP_MODEL
             )
             record["ocr_correction_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             record["status"] = "ocr_corrected"
@@ -2053,18 +2121,28 @@ class ClassFlowAIApp:
         record["ocr_raw_text"] = raw_text or cleaned_text or ""
 
         # OCR을 다시 실행하면 이전 보정 결과는 더 이상 현재 결과가 아닙니다.
+        flow_was_pending = record.get("flow_interpretation_status") in {"queued", "running"}
         for key in [
             "ocr_corrected_text",
             "ocr_correction_model",
             "ocr_correction_at",
             "ocr_correction_error",
             "ocr_correction_elapsed_sec",
+            "flow_title",
+            "flow_interpretation_text",
             "ocr_interpretation_text",
+            "flow_continues_previous",
+            "flow_review_required",
+            "flow_interpretation_parse_fallback",
             "ocr_interpretation_error",
-            "flow_interpretation_status",
             "flow_interpretation_error",
+            "group_id",
         ]:
             record.pop(key, None)
+        if flow_was_pending:
+            record["flow_interpretation_requeue"] = True
+        else:
+            record.pop("flow_interpretation_status", None)
         record["ocr_cleaned_diff"] = bool((raw_text or "").strip() and (raw_text or "").strip() != (cleaned_text or "").strip())
         record["ocr_provider"] = str(self.config.get("nvidia_ocr_model") or "nvidia/nemotron-ocr-v2")
         record["ocr_preprocess"] = str(self.config.get("ocr_preprocess_mode") or "sharp_gray")
@@ -2099,7 +2177,9 @@ class ClassFlowAIApp:
 
         # 빠른 OCR 결과는 즉시 사용할 수 있게 두고, 수업 흐름용 의미 해석은
         # 별도 작업에서 진행한다. 이 작업은 현재 결과 패널이나 클립보드를 바꾸지 않는다.
-        interpretation_started = self.start_flow_interpretation_background(record)
+        interpretation_started = bool(record.get("flow_interpretation_requeue"))
+        if not interpretation_started:
+            interpretation_started = self.start_flow_interpretation_background(record)
         background_suffix = " · 수업 흐름 해석은 백그라운드 진행" if interpretation_started else ""
 
         if auto_copy and bool(self.config.get("copy_ocr_to_clipboard_on_done", True)):
@@ -2122,7 +2202,7 @@ class ClassFlowAIApp:
             return False
         if record.get("flow_interpretation_status") in {"queued", "running"}:
             return False
-        if record.get("ocr_interpretation_text") and not force:
+        if (record.get("flow_interpretation_text") or record.get("ocr_interpretation_text")) and not force:
             return False
 
         ocr_text = str(record.get("ocr_corrected_text") or record.get("ocr_text") or "").strip()
@@ -2145,22 +2225,56 @@ class ClassFlowAIApp:
                 return False
             self.flow_interpretation_pending.add(pending_key)
 
-        inference_config = dict(self.config)
-        inference_config["cap_reasoning_prompt"] = build_flow_interpretation_prompt(ocr_text)
         record["flow_interpretation_status"] = "queued"
         record.pop("flow_interpretation_error", None)
         self.save_records()
         self.rebuild_outputs_from_records(save_records=False)
         self.update_result_action_buttons()
         self.flow_interpretation_queue.put({
-            "record": record,
             "record_id": record_id,
             "pending_key": pending_key,
             "workspace": workspace_at_start,
             "image_path": image_path,
-            "config": inference_config,
         })
         return True
+
+
+    @staticmethod
+    def _flow_previous_context(record: dict | None) -> dict | None:
+        if not isinstance(record, dict) or record.get("deleted"):
+            return None
+        mode = str(record.get("mode") or "").lower()
+        if mode == "ocr":
+            flow_status = str(record.get("flow_interpretation_status") or "").lower()
+            if flow_status in {"queued", "running", "failed", "waiting_for_api_key"}:
+                return None
+            summary = str(
+                record.get("flow_interpretation_text")
+                or record.get("ocr_interpretation_text")
+                or ""
+            ).strip()
+        else:
+            summary = str(record.get("cap_text") or "").strip()
+            if not summary or summary.startswith("CAP 분석 실패"):
+                return None
+        if not summary:
+            return None
+        title = str(
+            record.get("flow_title")
+            or record.get("title")
+            or record.get("memo")
+            or record.get("note")
+            or ""
+        ).strip()
+        if not title:
+            first_line = next((line for line in summary.splitlines() if line.strip()), "")
+            title = first_line.strip().lstrip("#").strip()[:80]
+        return {
+            "record_id": str(record.get("record_id") or "").strip(),
+            "title": title,
+            "summary": summary,
+            "group_id": str(record.get("group_id") or "").strip(),
+        }
 
 
     def _flow_interpretation_worker_loop(self) -> None:
@@ -2172,36 +2286,89 @@ class ClassFlowAIApp:
             if job is None:
                 self.flow_interpretation_queue.task_done()
                 return
-            record = job["record"]
+            record_id = str(job.get("record_id") or "").strip()
             workspace_at_start = job["workspace"]
             pending_key = job["pending_key"]
             try:
-                if (
-                    Path(self.workspace).resolve() != Path(workspace_at_start).resolve()
-                    or not any(value is record for value in self.capture_records)
-                ):
+                if Path(self.workspace).resolve() != Path(workspace_at_start).resolve():
                     with self.flow_interpretation_lock:
                         self.flow_interpretation_pending.discard(pending_key)
                     continue
+                record = next(
+                    (
+                        value for value in self.capture_records
+                        if not value.get("deleted")
+                        and str(value.get("record_id") or "").strip() == record_id
+                    ),
+                    None,
+                )
+                if record is None:
+                    with self.flow_interpretation_lock:
+                        self.flow_interpretation_pending.discard(pending_key)
+                    continue
+                ordered = active_ordered_records(self.capture_records)
+                try:
+                    current_index = next(index for index, value in enumerate(ordered) if value is record)
+                except StopIteration:
+                    with self.flow_interpretation_lock:
+                        self.flow_interpretation_pending.discard(pending_key)
+                    continue
+                previous_record = ordered[current_index - 1] if current_index > 0 else None
+                previous_context = self._flow_previous_context(previous_record)
+                previous_record_id = (
+                    str(previous_record.get("record_id") or "").strip()
+                    if previous_context and previous_record is not None
+                    else ""
+                )
+                ocr_text = str(
+                    record.get("ocr_corrected_text")
+                    or record.get("ocr_text")
+                    or ""
+                ).strip()
+                inference_config = dict(self.config)
+                inference_config["cap_reasoning_prompt"] = build_flow_interpretation_prompt(
+                    ocr_text,
+                    capture_index=current_index + 1,
+                    record_id=record_id,
+                    previous=previous_context,
+                )
                 record["flow_interpretation_status"] = "running"
                 self.root.after(0, lambda current=record: self._mark_flow_interpretation_running(current))
                 try:
-                    result = analyze_capture_image(
+                    raw_result = analyze_capture_image(
                         job["image_path"],
-                        job["config"],
+                        inference_config,
                         on_retry=self._show_transient_retry_status,
                     )
+                    raw_result = str(raw_result or "").strip()
+                    if raw_result.startswith("CAP 분석 실패"):
+                        raw_result = raw_result.replace("CAP 분석 실패", "수업 흐름 해석 실패", 1)
+                    result = parse_flow_interpretation_result(raw_result)
                 except Exception as exc:
                     result = "수업 흐름 해석 실패\n\n" + str(exc)
-                result = str(result or "").strip()
-                if result.startswith("CAP 분석 실패"):
-                    result = result.replace("CAP 분석 실패", "수업 흐름 해석 실패", 1)
-                self.root.after(
-                    0,
-                    lambda current=record, value=result, workspace=workspace_at_start, key=pending_key: (
-                        self._after_flow_interpretation(current, value, workspace, key)
-                    ),
-                )
+                completion = threading.Event()
+
+                def finish_on_ui(
+                    current=record,
+                    value=result,
+                    workspace=workspace_at_start,
+                    key=pending_key,
+                    previous_id=previous_record_id,
+                ):
+                    try:
+                        self._after_flow_interpretation(
+                            current,
+                            value,
+                            workspace,
+                            key,
+                            previous_record_id=previous_id,
+                        )
+                    finally:
+                        completion.set()
+
+                self.root.after(0, finish_on_ui)
+                while self.running and not completion.wait(0.1):
+                    pass
             finally:
                 self.flow_interpretation_queue.task_done()
 
@@ -2215,9 +2382,10 @@ class ClassFlowAIApp:
     def _after_flow_interpretation(
         self,
         record: dict,
-        result_text: str,
+        result,
         workspace_at_start: Path,
         pending_key=None,
+        previous_record_id: str = "",
     ) -> None:
         key = pending_key or (
             str(Path(workspace_at_start).resolve()),
@@ -2238,14 +2406,54 @@ class ClassFlowAIApp:
             self.start_flow_interpretation_background(record, force=True)
             return
 
-        result_text = str(result_text or "").strip()
-        failed = not result_text or result_text.startswith("수업 흐름 해석 실패")
+        parsed = result if isinstance(result, dict) else None
+        if parsed is None:
+            result_text = str(result or "").strip()
+            if result_text and not result_text.startswith("수업 흐름 해석 실패"):
+                try:
+                    parsed = parse_flow_interpretation_result(result_text)
+                except ValueError:
+                    parsed = None
+        else:
+            result_text = ""
+        failed = parsed is None
         if failed:
             record["flow_interpretation_status"] = "failed"
             record["flow_interpretation_error"] = result_text or "빈 응답"
         else:
+            ordered = active_ordered_records(self.capture_records)
+            try:
+                current_index = next(index for index, value in enumerate(ordered) if value is record)
+            except StopIteration:
+                return
+            previous = ordered[current_index - 1] if current_index > 0 else None
+            can_continue = bool(
+                parsed["continues_previous"]
+                and previous is not None
+                and previous_record_id
+                and str(previous.get("record_id") or "").strip() == previous_record_id
+            )
+            if can_continue:
+                group_id = str(previous.get("group_id") or previous_record_id).strip()
+                previous["group_id"] = group_id
+            else:
+                group_id = str(record.get("record_id") or "").strip()
+            body = str(parsed["body_markdown"]).strip()
             record["flow_interpretation_status"] = "done"
-            record["ocr_interpretation_text"] = result_text
+            record["flow_title"] = str(parsed["title"]).strip()
+            record["flow_interpretation_text"] = body
+            record["ocr_interpretation_text"] = body
+            record["flow_continues_previous"] = can_continue
+            record["group_id"] = group_id
+            review_required = list(parsed.get("review_required") or [])
+            if review_required:
+                record["flow_review_required"] = review_required
+            else:
+                record.pop("flow_review_required", None)
+            if parsed.get("parse_fallback"):
+                record["flow_interpretation_parse_fallback"] = True
+            else:
+                record.pop("flow_interpretation_parse_fallback", None)
             record.pop("flow_interpretation_error", None)
 
         self.save_records()
@@ -2258,6 +2466,7 @@ class ClassFlowAIApp:
                 "path": str(record.get("image_path") or ""),
                 "failed": failed,
                 "background": True,
+                "parse_fallback": bool(parsed and parsed.get("parse_fallback")),
             },
         )
         if failed:
@@ -2328,7 +2537,7 @@ class ClassFlowAIApp:
         record["cap_text"] = result_text
         record["cap_model"] = str(
             self.config.get("cap_reasoning_model")
-            or "qwen/qwen3.5-397b-a17b"
+            or DEFAULT_CAP_MODEL
         )
         record["cap_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         record["status"] = "cap_failed" if failed else "cap_done"
@@ -2794,9 +3003,9 @@ class ClassFlowAIApp:
             "CAP 추론 모델",
             str(
                 self.config.get("cap_reasoning_model")
-                or "qwen/qwen3.5-397b-a17b"
+                or DEFAULT_CAP_MODEL
             ),
-            "qwen/qwen3.5-397b-a17b",
+            DEFAULT_CAP_MODEL,
         )
 
         # ------------------------------------------------------
@@ -2870,7 +3079,7 @@ class ClassFlowAIApp:
                 new_config = dict(self.config)
                 new_config.update(
                     {
-                        "settings_schema_version": 5,
+                        "settings_schema_version": SETTINGS_SCHEMA_VERSION,
                         "workspace_dir": workspace_var.get().strip(),
                         "screenshot_hotkey": screenshot_hotkey_var.get().strip(),
                         "mode_toggle_hotkey": mode_hotkey_var.get().strip(),

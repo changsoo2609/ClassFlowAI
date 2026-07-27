@@ -11,7 +11,13 @@ from PIL import Image, ImageTk
 def _plain(value: str) -> str:
     text = re.sub(r"(?i)<br\s*/?>", "\n", value or "")
     text = re.sub(r"(?i)</(?:p|div|li|h[1-6])>", "\n", text)
-    return html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+    text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    cleaned_lines = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
+        line = re.sub(r"(?<!\w)\*\*(?=\S)(.*?\S)\*\*(?!\w)", r"\1", line)
+        cleaned_lines.append(line.rstrip())
+    return "\n".join(cleaned_lines).strip()
 
 
 def _section_copy_context(section: dict) -> dict:

@@ -9,6 +9,8 @@ from modules.capture_order import active_ordered_records
 
 
 CODE_FENCE = re.compile(r"```(?P<language>[\w.+#-]*)\s*\n(?P<code>.*?)```", re.DOTALL)
+MARKDOWN_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+SECTION_TITLE_HEADING = re.compile(r"^\s{0,3}##(?!#)\s+(.+?)\s*$")
 
 
 def _text(value) -> str:
@@ -26,7 +28,10 @@ def _record_id(record: dict, index: int) -> str:
 
 def _analysis_text(record: dict) -> str:
     if _text(record.get("mode")).lower() == "ocr":
-        return _text(record.get("ocr_interpretation_text"))
+        return _text(
+            record.get("flow_interpretation_text")
+            or record.get("ocr_interpretation_text")
+        )
     return _text(record.get("cap_text"))
 
 
@@ -36,11 +41,59 @@ def _is_failed_analysis(text: str) -> bool:
 
 
 def _section_title(record: dict, index: int, analysis: str) -> str:
-    explicit = _text(record.get("title") or record.get("memo") or record.get("note"))
+    explicit = _text(
+        record.get("flow_title")
+        or record.get("title")
+        or record.get("memo")
+        or record.get("note")
+    )
     if explicit:
         return explicit.splitlines()[0][:80]
-    first_line = next((line.strip("# -*\t") for line in analysis.splitlines() if line.strip()), "")
-    return first_line[:80] or f"캡처 {index}"
+    legacy_title, _body = _split_leading_heading(analysis)
+    return legacy_title[:80] or f"캡처 {index}"
+
+
+def _split_leading_heading(value: str) -> tuple[str, str]:
+    lines = str(value or "").strip().splitlines()
+    if not lines:
+        return "", ""
+    match = SECTION_TITLE_HEADING.match(lines[0])
+    if not match:
+        return "", "\n".join(lines).strip()
+    return match.group(1).strip(), "\n".join(lines[1:]).strip()
+
+
+def _inline_markdown(value: str) -> str:
+    escaped = html.escape(str(value or ""))
+    return re.sub(
+        r"(?<!\w)\*\*(?=\S)(.*?\S)\*\*(?!\w)",
+        r"<strong>\1</strong>",
+        escaped,
+    )
+
+
+def _markdown_html(value: str) -> str:
+    blocks = []
+    current = []
+    for raw_line in str(value or "").splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        heading = MARKDOWN_HEADING.match(line)
+        if heading:
+            current.append("<strong>" + _inline_markdown(heading.group(1)) + "</strong>")
+            continue
+        bullet = re.match(r"^\s*[-*+]\s+(.+)$", line)
+        if bullet:
+            current.append("• " + _inline_markdown(bullet.group(1)))
+            continue
+        current.append(_inline_markdown(line))
+    if current:
+        blocks.append(current)
+    return "".join("<p>" + "<br>".join(block) + "</p>" for block in blocks)
 
 
 def _analysis_items(section_id: str, analysis: str) -> list[dict]:
@@ -60,7 +113,7 @@ def _analysis_items(section_id: str, analysis: str) -> list[dict]:
             items.append({
                 "id": _stable_id("explanation", section_id + f":{cursor}"),
                 "type": "explanation",
-                "html": "<p>" + html.escape(before).replace("\n", "<br>") + "</p>",
+                "html": _markdown_html(before),
             })
         code_index += 1
         items.append({
@@ -76,7 +129,7 @@ def _analysis_items(section_id: str, analysis: str) -> list[dict]:
         items.append({
             "id": _stable_id("explanation", section_id + f":{cursor}"),
             "type": "explanation",
-            "html": "<p>" + html.escape(remainder).replace("\n", "<br>") + "</p>",
+            "html": _markdown_html(remainder),
         })
     return items
 
@@ -114,6 +167,7 @@ def build_flow_document(records: list[dict], title: str = "수업 흐름") -> di
         mode = "ocr" if _text(record.get("mode")).lower() == "ocr" else "cap"
         modes.add(mode)
         analysis = _analysis_text(record)
+        _legacy_title, analysis_body = _split_leading_heading(analysis)
         group_id = _text(
             record.get("group_id")
             or record.get("capture_group_id")
@@ -141,9 +195,24 @@ def build_flow_document(records: list[dict], title: str = "수업 흐름") -> di
             "alt": f"수업 캡처 {index}",
         })
         if mode == "ocr":
-            section["items"].extend(_ocr_analysis_items(section["id"], record, analysis))
+            section["items"].extend(_ocr_analysis_items(section["id"], record, analysis_body))
         else:
-            section["items"].extend(_analysis_items(section["id"], analysis))
+            section["items"].extend(_analysis_items(section["id"], analysis_body))
+        raw_review_required = record.get("flow_review_required")
+        review_required = [
+            _text(value)
+            for value in (raw_review_required if isinstance(raw_review_required, list) else [])
+            if _text(value)
+        ]
+        if review_required:
+            review_html = "<p><strong>확인 필요</strong><br>" + "<br>".join(
+                "• " + html.escape(value) for value in review_required
+            ) + "</p>"
+            section["items"].append({
+                "id": _stable_id("note", capture_id + ":review-required"),
+                "type": "note",
+                "html": review_html,
+            })
         memo = _text(record.get("memo") or record.get("note"))
         if memo and memo != section["title"]:
             section["items"].append({

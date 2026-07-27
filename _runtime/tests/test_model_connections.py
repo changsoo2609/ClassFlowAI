@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,14 +8,25 @@ from unittest.mock import patch
 import requests
 from PIL import Image
 
-from modules.nvidia_cap_reasoner import analyze_capture_image
+import modules.nvidia_cap_reasoner as cap_reasoner
+from modules.nvidia_cap_reasoner import (
+    DEFAULT_CAP_MODEL,
+    RETIRED_QWEN_CAP_MODEL,
+    analyze_capture_image,
+)
 from modules.ocr_engine import extract_text_from_image
 
 
-def response(status_code: int, text: str = "", payload: dict | None = None):
+def response(
+    status_code: int,
+    text: str = "",
+    payload: dict | None = None,
+    headers: dict | None = None,
+):
     return SimpleNamespace(
         status_code=status_code,
         text=text,
+        headers=headers or {},
         json=lambda: payload or {},
     )
 
@@ -35,7 +47,7 @@ class ModelConnectionErrorPathTests(unittest.TestCase):
         }
         self.cap_config = {
             "nvidia_api_key": "test-only-key",
-            "cap_reasoning_model": "qwen/qwen3.5-397b-a17b",
+            "cap_reasoning_model": DEFAULT_CAP_MODEL,
             "cap_reasoning_api_base": "https://example.test/cap",
             "cap_reasoning_connect_timeout_sec": 1,
             "cap_reasoning_timeout_sec": 1,
@@ -98,10 +110,111 @@ class ModelConnectionErrorPathTests(unittest.TestCase):
         self.assertIn("API가 오류", model_result)
         self.assertEqual(post.call_count, 1)
         payload = post.call_args.kwargs["json"]
-        self.assertEqual(
-            payload.get("chat_template_kwargs"),
-            {"enable_thinking": False},
+        self.assertNotIn("chat_template_kwargs", payload)
+
+    @patch("requests.post")
+    def test_cap_http_410_reports_unavailable_model_without_retry(self, post):
+        post.return_value = response(
+            410,
+            payload={
+                "status": 410,
+                "title": "Gone",
+                "detail": (
+                    "The model 'qwen/qwen3.5-397b-a17b' has reached its end of life "
+                    "and is no longer available."
+                ),
+            },
+            headers={
+                "Content-Type": "application/problem+json",
+                "NVCF-REQID": "req-test-410",
+            },
         )
+        diagnostic_log = Path(self.temp_dir.name) / "model_request_diagnostics.jsonl"
+
+        with patch.object(
+            cap_reasoner,
+            "MODEL_DIAGNOSTIC_LOG_PATH",
+            diagnostic_log,
+            create=True,
+        ):
+            result = analyze_capture_image(
+                self.image_path,
+                dict(self.cap_config, cap_reasoning_model=RETIRED_QWEN_CAP_MODEL),
+            )
+
+        self.assertIn("현재 NVIDIA API 키로 사용할 수 없습니다", result)
+        self.assertIn("HTTP 410", result)
+        self.assertIn(RETIRED_QWEN_CAP_MODEL, result)
+        self.assertEqual(post.call_count, 1)
+
+        entries = [
+            json.loads(line)
+            for line in diagnostic_log.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual([entry["event"] for entry in entries], ["request", "http_error"])
+        request_entry, error_entry = entries
+        self.assertEqual(request_entry["endpoint"], self.cap_config["cap_reasoning_api_base"])
+        self.assertEqual(request_entry["model_repr"], repr(RETIRED_QWEN_CAP_MODEL))
+        self.assertEqual(request_entry["model_length"], len(RETIRED_QWEN_CAP_MODEL))
+        self.assertEqual(request_entry["message_roles"], ["user"])
+        self.assertEqual(request_entry["message_content_types"], [["text", "image_url"]])
+        self.assertTrue(request_entry["has_image_url"])
+        self.assertEqual(request_entry["data_url_mime_type"], "image/png")
+        self.assertGreater(request_entry["image_bytes"], 0)
+        self.assertEqual(
+            request_entry["payload_keys"],
+            sorted(post.call_args.kwargs["json"].keys()),
+        )
+        self.assertEqual(request_entry["timeout"], [1, 1])
+        self.assertIn("request_at", request_entry)
+        self.assertEqual(error_entry["status_code"], 410)
+        self.assertEqual(error_entry["content_type"], "application/problem+json")
+        self.assertEqual(error_entry["error_code"], "410")
+        self.assertIn("has reached its end of life", error_entry["error_message"])
+        self.assertEqual(error_entry["request_id"], "req-test-410")
+
+        logged = diagnostic_log.read_text(encoding="utf-8")
+        self.assertNotIn(self.cap_config["nvidia_api_key"], logged)
+        self.assertNotIn("data:image/png;base64", logged)
+
+    @patch("requests.post")
+    def test_cap_default_config_uses_current_default_vlm(self, post):
+        post.return_value = response(
+            200,
+            payload={"choices": [{"message": {"content": "ok"}}]},
+        )
+        config = dict(self.cap_config)
+        config.pop("cap_reasoning_model")
+
+        self.assertEqual(analyze_capture_image(self.image_path, config), "ok")
+        self.assertEqual(post.call_args.kwargs["json"]["model"], DEFAULT_CAP_MODEL)
+        self.assertEqual(DEFAULT_CAP_MODEL, "google/diffusiongemma-26b-a4b-it")
+
+    @patch("requests.post")
+    def test_cap_selected_qwen_and_custom_models_reach_payload_unchanged(self, post):
+        post.return_value = response(
+            200,
+            payload={"choices": [{"message": {"content": "ok"}}]},
+        )
+        for model in (
+            "qwen/qwen3.5-397b-a17b",
+            "custom/provider-model",
+        ):
+            with self.subTest(model=model):
+                config = dict(self.cap_config, cap_reasoning_model=model)
+                self.assertEqual(analyze_capture_image(self.image_path, config), "ok")
+                self.assertEqual(post.call_args.kwargs["json"]["model"], model)
+
+    @patch("requests.post")
+    def test_fast_default_request_exception_does_not_fallback(self, post):
+        post.side_effect = requests.exceptions.RequestException("permanent")
+        config = dict(self.cap_config, cap_reasoning_model=DEFAULT_CAP_MODEL)
+
+        result = analyze_capture_image(self.image_path, config)
+
+        self.assertIn("요청에 실패", result)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["json"]["model"], DEFAULT_CAP_MODEL)
 
 
 if __name__ == "__main__":

@@ -5,10 +5,41 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from modules.flow_window import FlowResultWindow, _consume_wheel_delta, _preview_size
+from modules.flow_window import (
+    FlowResultWindow,
+    _consume_wheel_delta,
+    _plain,
+    _preview_size,
+    _section_copy_context,
+)
 
 
 class FlowWindowContextCopyTests(unittest.TestCase):
+    def test_plain_text_hides_limited_markdown_markers(self):
+        value = _plain("<p>### 핵심<br>**중요한 설명**<br>- 첫 단계</p>")
+        self.assertNotIn("###", value)
+        self.assertNotIn("**", value)
+        self.assertIn("핵심", value)
+        self.assertIn("중요한 설명", value)
+        self.assertIn("- 첫 단계", value)
+
+    def test_plain_text_preserves_non_markdown_double_stars(self):
+        value = _plain("<p>a ** b ** c<br>**kwargs는 인자 전달</p>")
+        self.assertIn("a ** b ** c", value)
+        self.assertIn("**kwargs는 인자 전달", value)
+
+    def test_section_copy_text_keeps_code_fence_without_heading_markers(self):
+        context = _section_copy_context({
+            "id": "section-1",
+            "items": [
+                {"type": "explanation", "html": "<p>### 실행 흐름<br>설명</p>"},
+                {"type": "code", "language": "python", "code": "print('ok')"},
+            ],
+        })
+        self.assertNotIn("###", context["text"])
+        self.assertIn("실행 흐름", context["text"])
+        self.assertIn("```python\nprint('ok')\n```", context["text"])
+
     def test_preview_dimensions_preserve_ratio_and_never_upscale(self):
         self.assertEqual(_preview_size(1520, 920), (760, 460))
         self.assertEqual(_preview_size(100, 50), (100, 50))
