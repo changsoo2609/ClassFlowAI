@@ -148,6 +148,7 @@ git check-ignore -v _runtime/config.json
 ClassFlowAI/
 ├─ START_HERE.bat
 ├─ INSTALL_FIRST.bat
+├─ README.md
 ├─ README.txt
 └─ _runtime/
 ```

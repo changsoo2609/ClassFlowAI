@@ -12,6 +12,7 @@ ClassFlowAI는 Windows 화면 캡처의 원본 촬영 정보를 보존하고, �
 ClassFlowAI/
 ├─ START_HERE.bat
 ├─ INSTALL_FIRST.bat
+├─ README.md                # GitHub 프로젝트 안내
 ├─ README.txt
 └─ _runtime/
    ├─ app.py
