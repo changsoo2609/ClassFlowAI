@@ -53,6 +53,11 @@ class CapPromptMigrationTests(unittest.TestCase):
         self.assertEqual(DEFAULT_CAP_PROMPT, DEFAULT_MANUAL_CAP_PROMPT)
         self.assertNotEqual(DEFAULT_CAP_PROMPT, DEFAULT_FLOW_INTERPRETATION_PROMPT)
 
+    def test_default_prompts_require_korean_proofreading(self):
+        rule = "출력 전에 한국어 맞춤법과 오탈자를 한 번 점검하고, 의미가 불분명한 조어를 만들지 않는다."
+        self.assertIn(rule, DEFAULT_MANUAL_CAP_PROMPT)
+        self.assertIn(rule, DEFAULT_FLOW_INTERPRETATION_PROMPT)
+
     def test_manual_cap_uses_user_prompt(self):
         self.assertEqual(
             build_cap_prompt({"cap_reasoning_prompt": "사용자 CAP 전용"}),
