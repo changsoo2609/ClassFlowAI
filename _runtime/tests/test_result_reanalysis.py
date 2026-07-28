@@ -201,6 +201,53 @@ class ResultReanalysisPromptTests(unittest.TestCase):
         self.assertIn("완성된 최종 해석 결과만", prompt)
 
 
+class ResultActionLayoutTests(unittest.TestCase):
+    def test_result_panel_builds_only_one_right_aligned_reanalysis_button(self):
+        buttons = []
+
+        def widget_factory(*args, **kwargs):
+            widget = Mock()
+            widget.parent = args[0] if args else None
+            widget.creation_options = kwargs
+            return widget
+
+        def button_factory(*args, **kwargs):
+            button = widget_factory(*args, **kwargs)
+            buttons.append(button)
+            return button
+
+        app = ClassFlowAIApp.__new__(ClassFlowAIApp)
+        app.root = Mock()
+        app.lesson_location_text = Mock(return_value="테스트 수업")
+        app.get_ocr_panel_text = Mock(return_value="현재 결과")
+
+        with patch.multiple(
+            "app.tk",
+            Frame=widget_factory,
+            LabelFrame=widget_factory,
+            Label=widget_factory,
+            Button=button_factory,
+            Text=widget_factory,
+            Listbox=widget_factory,
+            Scrollbar=widget_factory,
+            StringVar=widget_factory,
+        ):
+            app.build_ui()
+
+        result_buttons = [
+            button for button in buttons
+            if button.parent is app.result_actions
+        ]
+        self.assertEqual(len(result_buttons), 1)
+        button = result_buttons[0]
+        self.assertEqual(button.creation_options["text"], "결과 다시 수정")
+        self.assertEqual(button.creation_options["command"], app.reanalyze_current_result)
+        self.assertEqual(button.pack.call_args.kwargs["side"], "right")
+        self.assertEqual(app.result_actions.pack.call_args.kwargs["fill"], "x")
+        button.place.assert_not_called()
+        app.result_actions.place.assert_not_called()
+
+
 class ResultReanalysisAppTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -250,23 +297,25 @@ class ResultReanalysisAppTests(unittest.TestCase):
         self.app.get_current_record = Mock(return_value=self.record)
         self.app.result_actions = Mock()
         self.app.result_actions.winfo_manager.return_value = "pack"
-        self.app.ocr_refine_button = Mock()
-        self.app.ocr_refine_button.winfo_manager.return_value = "pack"
-        self.app.cap_copy_button = Mock()
-        self.app.cap_copy_button.winfo_manager.return_value = "pack"
         self.app.result_edit_button = Mock()
         self.app.result_edit_button.winfo_manager.return_value = "pack"
 
         ClassFlowAIApp.update_result_action_buttons(self.app)
         running_config = self.app.result_edit_button.config.call_args.kwargs
         self.assertEqual(running_config["state"], "disabled")
-        self.assertEqual(running_config["text"], "결과 확인 중…")
+        self.assertEqual(running_config["text"], "결과 다시 수정 중...")
 
         self.record["result_reanalysis_status"] = "failed"
         ClassFlowAIApp.update_result_action_buttons(self.app)
         failed_config = self.app.result_edit_button.config.call_args.kwargs
         self.assertEqual(failed_config["state"], "normal")
         self.assertEqual(failed_config["text"], "결과 다시 수정")
+
+        self.record["status"] = "cap_running"
+        ClassFlowAIApp.update_result_action_buttons(self.app)
+        processing_config = self.app.result_edit_button.config.call_args.kwargs
+        self.assertEqual(processing_config["state"], "disabled")
+        self.assertEqual(processing_config["text"], "결과 다시 수정")
 
     def make_running_app(self, record, workspace=None):
         workspace = Path(workspace or self.workspace)
@@ -289,6 +338,7 @@ class ResultReanalysisAppTests(unittest.TestCase):
         app.update_counter = Mock()
         app.update_result_action_buttons = Mock()
         app.set_status = Mock()
+        app.copy_text_to_clipboard = Mock(return_value=True)
         app.start_flow_interpretation_background = Mock(return_value=True)
         return app
 
@@ -322,6 +372,7 @@ class ResultReanalysisAppTests(unittest.TestCase):
             "cap_text": "현재 수업 결과",
         }
         app = self.make_running_app(current_record, workspace=current)
+        app.copy_text_to_clipboard = Mock(return_value=True)
 
         app._complete_result_reanalysis(job, "원래 수업의 새 해석")
 
@@ -333,6 +384,136 @@ class ResultReanalysisAppTests(unittest.TestCase):
         self.assertEqual(current_record["cap_text"], "현재 수업 결과")
         app.refresh_current_preview.assert_not_called()
         app.set_status.assert_not_called()
+        app.copy_text_to_clipboard.assert_not_called()
+
+    def test_current_cap_success_copies_exact_saved_display_result(self):
+        record = {
+            "record_id": "cap-copy",
+            "mode": "capture",
+            "cap_text": "기존 CAP 결과",
+        }
+        job = begin_reanalysis(record, self.workspace, "cap-copy-job")
+        app = self.make_running_app(record)
+        app.copy_text_to_clipboard = Mock(return_value=True)
+
+        app._complete_result_reanalysis(job, "  최신 CAP 결과  ")
+
+        displayed = app.get_current_result_text(record)
+        self.assertEqual(displayed, "최신 CAP 결과")
+        app.copy_text_to_clipboard.assert_called_once_with(displayed)
+
+    def test_current_ocr_success_copies_exact_saved_display_result(self):
+        record = {
+            "record_id": "ocr-copy",
+            "mode": "ocr",
+            "ocr_text": "OCR 원문",
+            "ocr_corrected_text": "기존 보정 결과",
+        }
+        job = begin_reanalysis(record, self.workspace, "ocr-copy-job")
+        app = self.make_running_app(record)
+        app.copy_text_to_clipboard = Mock(return_value=True)
+
+        app._complete_result_reanalysis(job, "  최신 OCR 결과  ")
+
+        displayed = app.get_current_result_text(record)
+        self.assertEqual(displayed, "최신 OCR 결과")
+        app.copy_text_to_clipboard.assert_called_once_with(displayed)
+
+    def test_same_lesson_selection_change_does_not_refresh_or_copy_late_result(self):
+        target = {
+            "record_id": "target-cap",
+            "mode": "capture",
+            "cap_text": "기존 대상 결과",
+        }
+        current = {
+            "record_id": "current-cap",
+            "mode": "capture",
+            "cap_text": "현재 보고 있는 결과",
+        }
+        job = begin_reanalysis(target, self.workspace, "late-cap-job")
+        app = self.make_running_app(target)
+        app.capture_records = [target, current]
+        app.current_record_index = 1
+        app.copy_text_to_clipboard = Mock(return_value=True)
+
+        app._complete_result_reanalysis(job, "늦게 완료된 대상 결과")
+
+        self.assertEqual(current_result(target), "늦게 완료된 대상 결과")
+        self.assertEqual(current_result(current), "현재 보고 있는 결과")
+        app.refresh_current_preview.assert_not_called()
+        app.update_ocr_panel.assert_not_called()
+        app.copy_text_to_clipboard.assert_not_called()
+
+    def test_api_failure_keeps_result_and_clipboard_unchanged(self):
+        record = {
+            "record_id": "cap-api-fail",
+            "mode": "capture",
+            "cap_text": "기존 정상 결과",
+        }
+        job = begin_reanalysis(record, self.workspace, "cap-api-fail-job")
+        app = self.make_running_app(record)
+        app.copy_text_to_clipboard = Mock(return_value=True)
+
+        app._complete_result_reanalysis(job, "CAP 분석 실패\n\nHTTP 503")
+
+        self.assertEqual(current_result(record), "기존 정상 결과")
+        app.copy_text_to_clipboard.assert_not_called()
+
+    def test_empty_response_keeps_result_and_clipboard_unchanged(self):
+        record = {
+            "record_id": "cap-empty",
+            "mode": "capture",
+            "cap_text": "기존 정상 결과",
+        }
+        job = begin_reanalysis(record, self.workspace, "cap-empty-job")
+        app = self.make_running_app(record)
+
+        app._complete_result_reanalysis(job, "   ")
+
+        self.assertEqual(current_result(record), "기존 정상 결과")
+        app.copy_text_to_clipboard.assert_not_called()
+
+    def test_clipboard_failure_does_not_roll_back_saved_result(self):
+        record = {
+            "record_id": "cap-clipboard-fail",
+            "mode": "capture",
+            "cap_text": "기존 정상 결과",
+        }
+        job = begin_reanalysis(record, self.workspace, "cap-clipboard-fail-job")
+        app = self.make_running_app(record)
+        app.copy_text_to_clipboard = Mock(return_value=False)
+
+        app._complete_result_reanalysis(job, "저장된 새 결과")
+
+        self.assertEqual(current_result(record), "저장된 새 결과")
+        app.copy_text_to_clipboard.assert_called_once_with("저장된 새 결과")
+        self.assertIn("클립보드 복사에 실패", app.set_status.call_args.args[0])
+
+    def test_save_failure_after_selection_change_does_not_refresh_current_capture(self):
+        target = {
+            "record_id": "save-target",
+            "mode": "capture",
+            "cap_text": "기존 대상 결과",
+        }
+        current = {
+            "record_id": "save-current",
+            "mode": "capture",
+            "cap_text": "현재 보고 있는 결과",
+        }
+        job = begin_reanalysis(target, self.workspace, "save-target-job")
+        app = self.make_running_app(target)
+        app.capture_records = [target, current]
+        app.current_record_index = 1
+        app.save_records = Mock(side_effect=OSError("disk unavailable"))
+
+        app._complete_result_reanalysis(job, "저장되면 안 되는 결과")
+
+        self.assertEqual(current_result(target), "기존 대상 결과")
+        self.assertEqual(current_result(current), "현재 보고 있는 결과")
+        app.refresh_current_preview.assert_not_called()
+        app.update_ocr_panel.assert_not_called()
+        app.set_status.assert_not_called()
+        app.copy_text_to_clipboard.assert_not_called()
 
     def test_save_failure_rolls_back_new_result_and_reenables_retry_state(self):
         record = {
@@ -348,6 +529,7 @@ class ResultReanalysisAppTests(unittest.TestCase):
         )
         app = self.make_running_app(record)
         app.save_records = Mock(side_effect=OSError("disk unavailable"))
+        app.copy_text_to_clipboard = Mock(return_value=True)
 
         app._complete_result_reanalysis(job, "저장되면 안 되는 새 결과")
 
@@ -355,6 +537,7 @@ class ResultReanalysisAppTests(unittest.TestCase):
         self.assertNotIn("cap_text_edited", record)
         self.assertEqual(record["result_reanalysis_status"], "failed")
         app.set_status.assert_called_once()
+        app.copy_text_to_clipboard.assert_not_called()
 
     @patch("app.messagebox.showinfo")
     @patch("app.messagebox.askyesno")

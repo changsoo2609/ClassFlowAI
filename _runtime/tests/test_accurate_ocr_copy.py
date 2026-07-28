@@ -117,7 +117,7 @@ class AccurateOcrCopyTests(unittest.TestCase):
         self.app.copy_text_to_clipboard.assert_called_once_with("저장된 보정본")
         self.app.run_ocr_correction_for_record_async.assert_not_called()
 
-    def test_correction_failure_offers_retry_and_manual_raw_copy(self):
+    def test_correction_failure_keeps_only_reanalysis_action(self):
         self.record.update({
             "ocr_text": "보존된 OCR 원문",
             "ocr_correction_error": "OCR 보정 실패",
@@ -126,20 +126,15 @@ class AccurateOcrCopyTests(unittest.TestCase):
         self.app.get_current_record = Mock(return_value=self.record)
         self.app.result_actions = Mock()
         self.app.result_actions.winfo_manager.return_value = "pack"
-        self.app.ocr_refine_button = Mock()
-        self.app.ocr_refine_button.winfo_manager.return_value = "pack"
-        self.app.cap_copy_button = Mock()
-        self.app.cap_copy_button.winfo_manager.return_value = ""
+        self.app.result_edit_button = Mock()
+        self.app.result_edit_button.winfo_manager.return_value = "pack"
 
         ClassFlowAIApp.update_result_action_buttons(self.app)
 
-        refine = self.app.ocr_refine_button.config.call_args.kwargs
-        raw_copy = self.app.cap_copy_button.config.call_args.kwargs
-        self.assertEqual(refine["text"], "다시 시도")
-        self.assertEqual(refine["command"], self.app.refine_current_ocr_and_copy)
-        self.assertEqual(raw_copy["text"], "OCR 원문 복사")
-        self.assertEqual(raw_copy["command"], self.app.copy_current_ocr_to_clipboard)
-        self.assertEqual(raw_copy["state"], "normal")
+        action = self.app.result_edit_button.config.call_args.kwargs
+        self.assertEqual(action["text"], "결과 다시 수정")
+        self.assertEqual(action["command"], self.app.reanalyze_current_result)
+        self.assertEqual(action["state"], "normal")
 
 
 if __name__ == "__main__":

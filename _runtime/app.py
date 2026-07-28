@@ -74,7 +74,6 @@ from modules.result_reanalysis import (
     apply_reanalysis_success,
     begin_reanalysis,
     current_result as current_reanalysis_result,
-    has_previous_result,
     restore_previous_result,
 )
 
@@ -685,26 +684,6 @@ class ClassFlowAIApp:
         result_actions = tk.Frame(right)
         self.result_actions = result_actions
 
-        self.ocr_refine_button = tk.Button(
-            result_actions,
-            text="CAP 원본 이미지 복사",
-            command=self.copy_current_cap_image,
-            width=18,
-            height=2,
-            state="disabled",
-        )
-        self.ocr_refine_button.pack(side="left")
-
-        self.cap_copy_button = tk.Button(
-            result_actions,
-            text="CAP 해석 복사",
-            command=self.copy_current_cap_result,
-            width=18,
-            height=2,
-            state="disabled",
-        )
-        self.cap_copy_button.pack(side="left", padx=(8, 0))
-
         self.result_edit_button = tk.Button(
             result_actions,
             text="결과 다시 수정",
@@ -713,17 +692,8 @@ class ClassFlowAIApp:
             height=2,
             state="disabled",
         )
-        self.result_edit_button.pack(side="left", padx=(8, 0))
-
-        self.result_restore_button = tk.Button(
-            result_actions,
-            text="직전 결과 복원",
-            command=self.restore_previous_reanalysis_result,
-            width=14,
-            height=2,
-            state="disabled",
-        )
-        self.result_restore_button.pack(side="left", padx=(8, 0))
+        result_actions.pack(fill="x", pady=(8, 0))
+        self.result_edit_button.pack(side="right")
 
 
     def format_execution_seconds(self, seconds) -> str:
@@ -873,7 +843,7 @@ class ClassFlowAIApp:
         return (
             "OCR 모드: 글자를 추출한 뒤 이미지 기준 보정 결과만 복사합니다.\n"
             "CAP 모드: 원본 이미지를 유지한 채 화면의 의미와 구조를 해석합니다.\n\n"
-            "CAP 해석 텍스트가 필요할 때만 [CAP 해석 복사]를 사용하세요."
+            "결과 텍스트는 결과 영역에서 선택해 복사할 수 있습니다."
         )
 
 
@@ -936,11 +906,10 @@ class ClassFlowAIApp:
 
 
     def update_result_action_buttons(self):
-        if not hasattr(self, "ocr_refine_button"):
+        if not hasattr(self, "result_edit_button"):
             return
 
         record = self.get_current_record()
-        mode = str(record.get("mode") or "capture").lower() if record is not None else ""
 
         if record is None:
             try:
@@ -952,150 +921,33 @@ class ClassFlowAIApp:
         try:
             if not self.result_actions.winfo_manager():
                 self.result_actions.pack(fill="x", pady=(8, 0))
+            if not self.result_edit_button.winfo_manager():
+                self.result_edit_button.pack(side="right")
+            else:
+                self.result_edit_button.pack_configure(side="right")
         except Exception:
             pass
-
-        if mode == "ocr":
-            status = str(record.get("status") or "")
-            ocr_text = str(record.get("ocr_text") or "").strip()
-            correction_failed = bool(str(record.get("ocr_correction_error") or "").strip())
-            result_reanalysis_running = str(
-                record.get("result_reanalysis_status") or ""
-            ).lower() == "running"
-            reanalysis_running = result_reanalysis_running or status in {
-                "ocr_running",
-                "ocr_correction_running",
-            }
-            refine_state = "disabled"
-            refine_text = "정확한 복사"
-            if result_reanalysis_running:
-                refine_text = "결과 확인 중…"
-            elif status == "ocr_correction_running":
-                refine_text = "정확한 OCR 처리 중…"
-            elif correction_failed:
-                refine_text = "다시 시도"
-            elif ocr_text and not ocr_text.lstrip().startswith("## OCR 실패"):
-                refine_state = "normal"
-                if record.get("ocr_corrected_text"):
-                    refine_text = "정확한 복사 다시 실행"
-            try:
-                if not self.ocr_refine_button.winfo_manager():
-                    self.ocr_refine_button.pack(side="right")
-                else:
-                    self.ocr_refine_button.pack_configure(side="right")
-                self.ocr_refine_button.config(
-                    state=refine_state,
-                    text=refine_text,
-                    command=self.refine_current_ocr_and_copy,
-                )
-                if correction_failed and ocr_text and not ocr_text.lstrip().startswith("## OCR 실패"):
-                    if not self.cap_copy_button.winfo_manager():
-                        self.cap_copy_button.pack(side="left", padx=(8, 0))
-                    self.cap_copy_button.config(
-                        state="normal",
-                        text="OCR 원문 복사",
-                        command=self.copy_current_ocr_to_clipboard,
-                    )
-                else:
-                    self.cap_copy_button.pack_forget()
-                if hasattr(self, "result_edit_button"):
-                    result_value = current_reanalysis_result(record)
-                    image_exists = Path(str(record.get("image_path") or "")).is_file()
-                    if result_value and image_exists:
-                        if not self.result_edit_button.winfo_manager():
-                            self.result_edit_button.pack(side="left", padx=(8, 0))
-                        self.result_edit_button.config(
-                            state="disabled" if reanalysis_running else "normal",
-                            text="결과 확인 중…" if reanalysis_running else "결과 다시 수정",
-                            command=self.reanalyze_current_result,
-                        )
-                    else:
-                        self.result_edit_button.pack_forget()
-                if hasattr(self, "result_restore_button"):
-                    if has_previous_result(record):
-                        if not self.result_restore_button.winfo_manager():
-                            self.result_restore_button.pack(side="left", padx=(8, 0))
-                        self.result_restore_button.config(
-                            state="disabled" if reanalysis_running else "normal",
-                            text="직전 결과 복원",
-                            command=self.restore_previous_reanalysis_result,
-                        )
-                    else:
-                        self.result_restore_button.pack_forget()
-            except Exception:
-                pass
-            return
-
-        try:
-            if not self.ocr_refine_button.winfo_manager():
-                self.ocr_refine_button.pack(side="left")
-            if not self.cap_copy_button.winfo_manager():
-                self.cap_copy_button.pack(side="left", padx=(8, 0))
-            if hasattr(self, "result_edit_button") and not self.result_edit_button.winfo_manager():
-                self.result_edit_button.pack(side="left", padx=(8, 0))
-        except Exception:
-            pass
-
-        refine_state = "disabled"
-        refine_text = "CAP 원본 이미지 복사"
-        refine_command = self.copy_current_cap_image
-        second_state = "disabled"
-        second_text = "CAP 해석 복사"
-        second_command = self.copy_current_cap_result
 
         status = str(record.get("status") or "")
-        result_reanalysis_running = str(
+        reanalysis_running = str(
             record.get("result_reanalysis_status") or ""
         ).lower() == "running"
-        reanalysis_running = result_reanalysis_running or status == "cap_running"
-        cap_text = effective_analysis_text(record)
-        image_path = Path(str(record.get("image_path") or ""))
-        if image_path.exists():
-            refine_state = "normal"
-        if status == "cap_running":
-            second_text = "CAP 분석 중…"
-        elif status == "cap_failed":
-            second_text = "다시 시도"
-            second_command = self.retry_current_model_request
-            second_state = "normal"
-        elif cap_text and not cap_text.startswith("CAP 분석 실패"):
-            second_state = "normal"
-        if result_reanalysis_running and second_command == self.retry_current_model_request:
-            second_state = "disabled"
-            second_text = "결과 확인 중…"
+        conflicting_process = status in {
+            "ocr_running",
+            "ocr_correction_running",
+            "cap_running",
+        }
+        reanalysis_ready = bool(
+            current_reanalysis_result(record)
+            and Path(str(record.get("image_path") or "")).is_file()
+        )
 
         try:
-            self.ocr_refine_button.config(
-                state=refine_state,
-                text=refine_text,
-                command=refine_command,
+            self.result_edit_button.config(
+                state="disabled" if reanalysis_running or conflicting_process or not reanalysis_ready else "normal",
+                text="결과 다시 수정 중..." if reanalysis_running else "결과 다시 수정",
+                command=self.reanalyze_current_result,
             )
-            self.cap_copy_button.config(
-                state=second_state,
-                text=second_text,
-                command=second_command,
-            )
-            if hasattr(self, "result_edit_button"):
-                reanalysis_ready = bool(
-                    current_reanalysis_result(record)
-                    and Path(str(record.get("image_path") or "")).is_file()
-                )
-                self.result_edit_button.config(
-                    state="disabled" if reanalysis_running or not reanalysis_ready else "normal",
-                    text="결과 확인 중…" if reanalysis_running else "결과 다시 수정",
-                    command=self.reanalyze_current_result,
-                )
-            if hasattr(self, "result_restore_button"):
-                if has_previous_result(record):
-                    if not self.result_restore_button.winfo_manager():
-                        self.result_restore_button.pack(side="left", padx=(8, 0))
-                    self.result_restore_button.config(
-                        state="disabled" if reanalysis_running else "normal",
-                        text="직전 결과 복원",
-                        command=self.restore_previous_reanalysis_result,
-                    )
-                else:
-                    self.result_restore_button.pack_forget()
         except Exception:
             pass
 
@@ -1386,11 +1238,17 @@ class ClassFlowAIApp:
                 target_record.update(target_snapshot)
                 target_record["result_reanalysis_status"] = "failed"
                 target_record["result_reanalysis_error"] = f"저장 실패: {type(exc).__name__}"
-                self.refresh_current_preview()
-                self.update_ocr_panel()
-                self.update_result_action_buttons()
-            if is_current_workspace:
-                self.set_status("재분석 결과 저장에 실패하여 기존 결과를 유지합니다.")
+                current_record = self.get_current_record()
+                is_current_capture = bool(
+                    current_record is not None
+                    and str(current_record.get("record_id") or "").strip()
+                    == str(job.get("capture_id") or "").strip()
+                )
+                if is_current_capture:
+                    self.refresh_current_preview()
+                    self.update_ocr_panel()
+                    self.update_result_action_buttons()
+                    self.set_status("재분석 결과 저장에 실패하여 기존 결과를 유지합니다.")
             return
         finally:
             with self.result_reanalysis_lock:
@@ -1400,23 +1258,37 @@ class ClassFlowAIApp:
             return
 
         self.rebuild_outputs_from_records(save_records=False)
-        self.refresh_current_preview()
-        self.update_ocr_panel()
-        self.update_mini_status()
-        self.update_counter()
-        self.update_result_action_buttons()
-        if failed:
-            category = self._result_reanalysis_error_category(
-                str(target_record.get("result_reanalysis_error") or "")
-            )
-            self.set_status(f"재분석에 실패하여 기존 결과를 유지합니다. ({category})")
-        else:
-            self.set_status("다시 분석한 결과로 수정되었습니다.")
-            if job.get("result_type") == "ocr":
-                target_record.pop("flow_interpretation_needs_refresh", None)
-                if not self.start_flow_interpretation_background(target_record, force=True):
-                    target_record["flow_interpretation_needs_refresh"] = True
-                    self.save_records()
+        current_record = self.get_current_record()
+        is_current_capture = bool(
+            current_record is not None
+            and str(current_record.get("record_id") or "").strip()
+            == str(job.get("capture_id") or "").strip()
+        )
+        if is_current_capture:
+            self.refresh_current_preview()
+            self.update_ocr_panel()
+            self.update_mini_status()
+            self.update_counter()
+            self.update_result_action_buttons()
+            if failed:
+                category = self._result_reanalysis_error_category(
+                    str(target_record.get("result_reanalysis_error") or "")
+                )
+                self.set_status(f"재분석에 실패하여 기존 결과를 유지합니다. ({category})")
+            else:
+                latest_result = self.get_current_result_text(target_record).strip()
+                copied = bool(latest_result) and self.copy_text_to_clipboard(latest_result)
+                self.set_status(
+                    "다시 분석한 결과로 수정하고 클립보드에 복사했습니다."
+                    if copied
+                    else "다시 분석한 결과로 수정했지만 클립보드 복사에 실패했습니다."
+                )
+
+        if not failed and job.get("result_type") == "ocr":
+            target_record.pop("flow_interpretation_needs_refresh", None)
+            if not self.start_flow_interpretation_background(target_record, force=True):
+                target_record["flow_interpretation_needs_refresh"] = True
+                self.save_records()
 
         try:
             append_event(
@@ -3051,7 +2923,7 @@ class ClassFlowAIApp:
             "CAP 이미지 분석 완료 "
             f"({self.format_execution_seconds(elapsed)}). "
             "원본 이미지는 클립보드에 유지됩니다. "
-            "텍스트가 필요하면 [CAP 해석 복사]를 누르세요."
+            "결과 텍스트는 결과 영역에서 선택해 복사할 수 있습니다."
         )
 
 

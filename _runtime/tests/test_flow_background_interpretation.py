@@ -509,22 +509,19 @@ class FlowBackgroundInterpretationTests(unittest.TestCase):
         self.assertTrue(event["parse_fallback"])
         self.assertNotIn("레거시 본문", str(event))
 
-    def test_ocr_keeps_correction_button_but_hides_background_interpret_button(self):
-        self.app.ocr_refine_button = Mock()
-        self.app.ocr_refine_button.winfo_manager.return_value = "pack"
-        self.app.cap_copy_button = Mock()
+    def test_ocr_result_panel_keeps_only_reanalysis_button(self):
+        self.app.result_edit_button = Mock()
+        self.app.result_edit_button.winfo_manager.return_value = "pack"
         self.app.result_actions = Mock()
         self.app.result_actions.winfo_manager.return_value = "pack"
         self.app.get_current_record = Mock(return_value=self.record)
         ClassFlowAIApp.update_result_action_buttons(self.app)
         self.app.result_actions.pack_forget.assert_not_called()
-        self.app.ocr_refine_button.config.assert_called_once()
+        self.app.result_edit_button.config.assert_called_once()
         self.assertEqual(
-            self.app.ocr_refine_button.config.call_args.kwargs["text"],
-            "정확한 복사",
+            self.app.result_edit_button.config.call_args.kwargs["text"],
+            "결과 다시 수정",
         )
-        self.app.cap_copy_button.config.assert_not_called()
-        self.app.cap_copy_button.pack_forget.assert_called_once_with()
 
 
 class FlowInterpretationParserTests(unittest.TestCase):
