@@ -459,6 +459,21 @@ def build_cap_prompt(config: dict | None = None) -> str:
     return custom_prompt or DEFAULT_CAP_PROMPT
 
 
+def build_cap_revision_prompt(config: dict | None, current_result: str) -> str:
+    return (
+        build_cap_prompt(config)
+        + "\n\n--- 결과 재분석 지시 ---\n"
+        + "현재 해석 결과를 참고하되 그대로 신뢰하지 말고, 원본 이미지를 다시 분석하여 처음부터 확인하세요.\n"
+        + "원본 이미지에 근거하여 현재 결과의 잘못된 설명, 누락된 핵심 내용, "
+        + "부정확한 연결 관계를 수정하세요.\n"
+        + "이미지로 확인할 수 없는 내용을 추측해서 추가하지 말고, 설명이나 수정 내역 없이 "
+        + "교정이 완료된 완성된 최종 해석 결과만 반환하세요.\n\n"
+        + "--- 현재 저장된 해석 결과 ---\n"
+        + str(current_result or "").strip()
+        + "\n--- 현재 결과 끝 ---"
+    )
+
+
 def _apply_model_request_options(payload: dict, model: str) -> None:
     # Qwen 3.5는 thinking 모드가 기본값이라 짧은 이미지 분석도 첫 응답이
     # 오래 지연될 수 있다. ClassFlowAI는 최종 결과만 사용하므로 공식 API의
@@ -468,7 +483,9 @@ def _apply_model_request_options(payload: dict, model: str) -> None:
 
 
 DEFAULT_OCR_CORRECTION_PROMPT = """
-원본 이미지와 아래 OCR 결과를 직접 비교하여 OCR 오류만 수정하세요.
+현재 OCR 결과를 참고하되 그대로 신뢰하지 말고, 원본 이미지를 다시 자세히 확인하세요.
+현재 결과에서 원본 이미지와 다른 오타, 누락, 중복, 잘못 인식한 문자와 문장 구조를 수정하세요.
+이미지에 없는 내용을 새로 만들지 말고, 교정이 완료된 최종 텍스트만 반환하세요.
 
 목적:
 - 사용자가 바로 복사할 수 있는 정확한 텍스트를 반환
@@ -601,7 +618,12 @@ def correct_ocr_with_image(image_path: Path, ocr_text: str, config: dict, on_ret
 
 
 
-def analyze_capture_image(image_path: Path, config: dict, on_retry=None) -> str:
+def analyze_capture_image(
+    image_path: Path,
+    config: dict,
+    on_retry=None,
+    current_result: str | None = None,
+) -> str:
     api_key = _get_api_key(config)
     if not api_key:
         return _failure("NVIDIA API 키가 없습니다.", "설정에서 NVIDIA API 키를 입력하세요.")
@@ -635,7 +657,14 @@ def analyze_capture_image(image_path: Path, config: dict, on_retry=None) -> str:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": build_cap_prompt(config)},
+                    {
+                        "type": "text",
+                        "text": (
+                            build_cap_revision_prompt(config, current_result)
+                            if str(current_result or "").strip()
+                            else build_cap_prompt(config)
+                        ),
+                    },
                     {
                         "type": "image_url",
                         "image_url": {"url": data_url},

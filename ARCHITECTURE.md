@@ -23,6 +23,7 @@ ClassFlowAI/
    └─ modules/
       ├─ clipboard_watcher.py
       ├─ capture_order.py
+      ├─ result_reanalysis.py
       ├─ storage.py
       ├─ ocr_engine.py
       ├─ nvidia_cap_reasoner.py

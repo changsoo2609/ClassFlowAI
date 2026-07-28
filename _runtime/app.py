@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 import webbrowser
 from pathlib import Path
 from tkinter import messagebox, filedialog, ttk
@@ -38,14 +39,9 @@ from modules.capture_order import (
 )
 from modules.capture_deletion import delete_capture_files
 from modules.flow_document import (
-    apply_analysis_edit,
     build_flow_document,
-    editable_analysis_text,
     effective_analysis_text,
     effective_section_title,
-    has_editable_analysis,
-    is_analysis_edited,
-    restore_analysis_original,
     save_flow_document,
 )
 from modules.flow_window import open_flow_result_window
@@ -72,6 +68,14 @@ from modules.nvidia_cap_reasoner import (
     LEGACY_SHARED_CAP_PROMPT,
     parse_flow_interpretation_result,
     RETIRED_QWEN_CAP_MODEL,
+)
+from modules.result_reanalysis import (
+    apply_reanalysis_failure,
+    apply_reanalysis_success,
+    begin_reanalysis,
+    current_result as current_reanalysis_result,
+    has_previous_result,
+    restore_previous_result,
 )
 
 
@@ -526,6 +530,8 @@ class ClassFlowAIApp:
         self.flow_interpretation_queue = queue.Queue()
         self.flow_interpretation_pending = set()
         self.flow_interpretation_lock = threading.RLock()
+        self.result_reanalysis_jobs = {}
+        self.result_reanalysis_lock = threading.RLock()
         self.load_records()
 
         self.root.title("ClassFlowAI")
@@ -554,6 +560,7 @@ class ClassFlowAIApp:
             daemon=True,
         )
         self.flow_interpretation_worker.start()
+        self.root.after(0, self._resume_pending_flow_after_reanalysis)
 
     def build_ui(self):
         top = tk.Frame(self.root)
@@ -700,13 +707,23 @@ class ClassFlowAIApp:
 
         self.result_edit_button = tk.Button(
             result_actions,
-            text="결과 수정",
-            command=self.open_current_result_editor,
+            text="결과 다시 수정",
+            command=self.reanalyze_current_result,
             width=14,
             height=2,
             state="disabled",
         )
         self.result_edit_button.pack(side="left", padx=(8, 0))
+
+        self.result_restore_button = tk.Button(
+            result_actions,
+            text="직전 결과 복원",
+            command=self.restore_previous_reanalysis_result,
+            width=14,
+            height=2,
+            state="disabled",
+        )
+        self.result_restore_button.pack(side="left", padx=(8, 0))
 
 
     def format_execution_seconds(self, seconds) -> str:
@@ -854,7 +871,7 @@ class ClassFlowAIApp:
 
     def get_flow_overview_text(self) -> str:
         return (
-            "OCR 모드: 글자를 빠르게 추출하고 자동 복사합니다.\n"
+            "OCR 모드: 글자를 추출한 뒤 이미지 기준 보정 결과만 복사합니다.\n"
             "CAP 모드: 원본 이미지를 유지한 채 화면의 의미와 구조를 해석합니다.\n\n"
             "CAP 해석 텍스트가 필요할 때만 [CAP 해석 복사]를 사용하세요."
         )
@@ -864,6 +881,13 @@ class ClassFlowAIApp:
         record = record or self.get_current_record()
         if record is None:
             return ""
+
+        if str(record.get("result_reanalysis_status") or "").lower() == "running":
+            return (
+                "결과 다시 확인 중...\n\n"
+                "원본 이미지를 다시 분석하고 있습니다.\n"
+                "기존 정상 결과는 안전하게 유지됩니다."
+            )
 
         display_type = str(
             record.get("display_result_type")
@@ -935,9 +959,18 @@ class ClassFlowAIApp:
             status = str(record.get("status") or "")
             ocr_text = str(record.get("ocr_text") or "").strip()
             correction_failed = bool(str(record.get("ocr_correction_error") or "").strip())
+            result_reanalysis_running = str(
+                record.get("result_reanalysis_status") or ""
+            ).lower() == "running"
+            reanalysis_running = result_reanalysis_running or status in {
+                "ocr_running",
+                "ocr_correction_running",
+            }
             refine_state = "disabled"
             refine_text = "정확한 복사"
-            if status == "ocr_correction_running":
+            if result_reanalysis_running:
+                refine_text = "결과 확인 중…"
+            elif status == "ocr_correction_running":
                 refine_text = "정확한 OCR 처리 중…"
             elif correction_failed:
                 refine_text = "다시 시도"
@@ -966,16 +999,29 @@ class ClassFlowAIApp:
                 else:
                     self.cap_copy_button.pack_forget()
                 if hasattr(self, "result_edit_button"):
-                    if has_editable_analysis(record):
+                    result_value = current_reanalysis_result(record)
+                    image_exists = Path(str(record.get("image_path") or "")).is_file()
+                    if result_value and image_exists:
                         if not self.result_edit_button.winfo_manager():
                             self.result_edit_button.pack(side="left", padx=(8, 0))
                         self.result_edit_button.config(
-                            state="normal",
-                            text="결과 다시 수정" if is_analysis_edited(record) else "결과 수정",
-                            command=self.open_current_result_editor,
+                            state="disabled" if reanalysis_running else "normal",
+                            text="결과 확인 중…" if reanalysis_running else "결과 다시 수정",
+                            command=self.reanalyze_current_result,
                         )
                     else:
                         self.result_edit_button.pack_forget()
+                if hasattr(self, "result_restore_button"):
+                    if has_previous_result(record):
+                        if not self.result_restore_button.winfo_manager():
+                            self.result_restore_button.pack(side="left", padx=(8, 0))
+                        self.result_restore_button.config(
+                            state="disabled" if reanalysis_running else "normal",
+                            text="직전 결과 복원",
+                            command=self.restore_previous_reanalysis_result,
+                        )
+                    else:
+                        self.result_restore_button.pack_forget()
             except Exception:
                 pass
             return
@@ -998,6 +1044,10 @@ class ClassFlowAIApp:
         second_command = self.copy_current_cap_result
 
         status = str(record.get("status") or "")
+        result_reanalysis_running = str(
+            record.get("result_reanalysis_status") or ""
+        ).lower() == "running"
+        reanalysis_running = result_reanalysis_running or status == "cap_running"
         cap_text = effective_analysis_text(record)
         image_path = Path(str(record.get("image_path") or ""))
         if image_path.exists():
@@ -1010,6 +1060,9 @@ class ClassFlowAIApp:
             second_state = "normal"
         elif cap_text and not cap_text.startswith("CAP 분석 실패"):
             second_state = "normal"
+        if result_reanalysis_running and second_command == self.retry_current_model_request:
+            second_state = "disabled"
+            second_text = "결과 확인 중…"
 
         try:
             self.ocr_refine_button.config(
@@ -1023,11 +1076,26 @@ class ClassFlowAIApp:
                 command=second_command,
             )
             if hasattr(self, "result_edit_button"):
-                self.result_edit_button.config(
-                    state="normal" if has_editable_analysis(record) else "disabled",
-                    text="결과 다시 수정" if is_analysis_edited(record) else "결과 수정",
-                    command=self.open_current_result_editor,
+                reanalysis_ready = bool(
+                    current_reanalysis_result(record)
+                    and Path(str(record.get("image_path") or "")).is_file()
                 )
+                self.result_edit_button.config(
+                    state="disabled" if reanalysis_running or not reanalysis_ready else "normal",
+                    text="결과 확인 중…" if reanalysis_running else "결과 다시 수정",
+                    command=self.reanalyze_current_result,
+                )
+            if hasattr(self, "result_restore_button"):
+                if has_previous_result(record):
+                    if not self.result_restore_button.winfo_manager():
+                        self.result_restore_button.pack(side="left", padx=(8, 0))
+                    self.result_restore_button.config(
+                        state="disabled" if reanalysis_running else "normal",
+                        text="직전 결과 복원",
+                        command=self.restore_previous_reanalysis_result,
+                    )
+                else:
+                    self.result_restore_button.pack_forget()
         except Exception:
             pass
 
@@ -1080,119 +1148,289 @@ class ClassFlowAIApp:
 
         return "break"
 
-    @staticmethod
-    def _analysis_edit_snapshot(record: dict) -> dict:
-        keys = (
-            "cap_text_edited",
-            "flow_title_edited",
-            "flow_interpretation_text_edited",
-            "analysis_edited_at",
-        )
-        return {key: record[key] for key in keys if key in record}
+    def reanalyze_current_result(self):
+        record = self.get_current_record()
+        if record is None:
+            self.set_status("다시 분석할 결과가 없습니다.")
+            return
+        self.start_result_reanalysis(record)
 
-    @staticmethod
-    def _restore_analysis_edit_snapshot(record: dict, snapshot: dict) -> None:
-        for key in (
-            "cap_text_edited",
-            "flow_title_edited",
-            "flow_interpretation_text_edited",
-            "analysis_edited_at",
-        ):
-            record.pop(key, None)
-        record.update(snapshot)
+    def restore_previous_reanalysis_result(self) -> bool:
+        record = self.get_current_record()
+        if record is None:
+            self.set_status("복원할 결과가 없습니다.")
+            return False
+        snapshot = dict(record)
+        if not restore_previous_result(record):
+            self.set_status("복원할 직전 결과가 없거나 재분석이 진행 중입니다.")
+            return False
+        try:
+            self.save_records()
+        except Exception:
+            record.clear()
+            record.update(snapshot)
+            self.set_status("직전 결과를 저장하지 못해 현재 결과를 유지합니다.")
+            return False
 
-    def _refresh_after_analysis_edit(self, status_message: str) -> None:
         self.rebuild_outputs_from_records(save_records=False)
         self.refresh_current_preview()
         self.update_ocr_panel()
         self.update_result_action_buttons()
-        self.set_status(status_message)
-
-    def save_record_analysis_edit(self, record: dict, text: str) -> bool:
-        snapshot = self._analysis_edit_snapshot(record)
-        try:
-            apply_analysis_edit(record, text)
-            self.save_records()
-        except Exception as exc:
-            self._restore_analysis_edit_snapshot(record, snapshot)
-            messagebox.showerror(
-                "결과 수정 저장 실패",
-                f"수정한 해석 결과를 저장하지 못했습니다.\n기존 결과는 변경되지 않았습니다.\n\n{exc}",
-            )
-            self.set_status("수정한 해석 결과를 저장하지 못했습니다.")
-            return False
-
-        self._refresh_after_analysis_edit("수정한 해석 결과를 저장했습니다.")
+        self.set_status("직전 정상 결과로 복원했습니다.")
+        if str(record.get("mode") or "").lower() == "ocr":
+            record.pop("flow_interpretation_needs_refresh", None)
+            if not self.start_flow_interpretation_background(record, force=True):
+                record["flow_interpretation_needs_refresh"] = True
+                self.save_records()
         return True
 
-    def restore_record_analysis_edit(self, record: dict) -> bool:
-        snapshot = self._analysis_edit_snapshot(record)
-        if not restore_analysis_original(record):
+    def _ensure_result_reanalysis_state(self) -> None:
+        if not hasattr(self, "result_reanalysis_lock"):
+            self.result_reanalysis_lock = threading.RLock()
+        if not hasattr(self, "result_reanalysis_jobs"):
+            self.result_reanalysis_jobs = {}
+
+    def start_result_reanalysis(self, record: dict) -> bool:
+        self._ensure_result_reanalysis_state()
+        if str(record.get("status") or "").lower() in {
+            "ocr_running",
+            "ocr_correction_running",
+            "cap_running",
+        }:
+            self.set_status("현재 처리가 끝난 뒤 결과를 다시 분석해 주세요.")
             return False
+        image_path = Path(str(record.get("image_path") or ""))
+        if not image_path.is_file():
+            self.set_status("원본 이미지를 찾을 수 없어 결과를 다시 분석할 수 없습니다.")
+            return False
+        if not self.has_nvidia_api_key():
+            self.set_status("NVIDIA API 키가 없어 결과를 다시 분석할 수 없습니다.")
+            return False
+
+        snapshot = dict(record)
+        job = None
         try:
+            with self.result_reanalysis_lock:
+                job = begin_reanalysis(
+                    record,
+                    workspace=Path(self.workspace),
+                    job_id=uuid.uuid4().hex,
+                )
+                job["image_path"] = str(image_path.resolve())
+                self.result_reanalysis_jobs[job["job_id"]] = job
             self.save_records()
         except Exception as exc:
-            self._restore_analysis_edit_snapshot(record, snapshot)
-            messagebox.showerror(
-                "원본 결과 복원 실패",
-                f"원본 해석 결과로 복원하지 못했습니다.\n기존 수정 내용은 유지됩니다.\n\n{exc}",
+            if job is not None:
+                with self.result_reanalysis_lock:
+                    self.result_reanalysis_jobs.pop(str(job.get("job_id") or ""), None)
+            record.clear()
+            record.update(snapshot)
+            self.set_status(
+                str(exc)
+                if isinstance(exc, ValueError)
+                else "결과 재분석을 시작하지 못했습니다. 기존 결과는 유지됩니다."
             )
-            self.set_status("원본 해석 결과로 복원하지 못했습니다.")
             return False
 
-        self._refresh_after_analysis_edit("원본 해석 결과로 복원했습니다.")
+        self.refresh_current_preview()
+        self.update_ocr_panel()
+        self.update_result_action_buttons()
+        self.set_status("결과 다시 확인 중... 원본 이미지를 다시 분석하고 있습니다.")
+        inference_config = dict(self.config)
+        job["model"] = str(inference_config.get("cap_reasoning_model") or DEFAULT_CAP_MODEL)
+        retry_callback = lambda message: self._queue_result_reanalysis_retry_status(job, message)
+
+        def worker():
+            try:
+                if job["result_type"] == "ocr":
+                    result = correct_ocr_with_image(
+                        image_path=image_path,
+                        ocr_text=job["current_result"],
+                        config=inference_config,
+                        on_retry=retry_callback,
+                    )
+                else:
+                    result = analyze_capture_image(
+                        image_path,
+                        inference_config,
+                        on_retry=retry_callback,
+                        current_result=job["current_result"],
+                    )
+            except Exception as exc:
+                prefix = "OCR 보정 실패" if job["result_type"] == "ocr" else "CAP 분석 실패"
+                result = f"{prefix}\n\n예상하지 못한 내부 오류 ({type(exc).__name__})"
+
+            try:
+                self.root.after(
+                    0,
+                    lambda: self._complete_result_reanalysis(job, result),
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
         return True
 
-    def open_current_result_editor(self):
-        record = self.get_current_record()
-        if record is None or not has_editable_analysis(record):
-            self.set_status("수정할 해석 결과가 없습니다.")
+    def _queue_result_reanalysis_retry_status(self, job: dict, message: str) -> None:
+        def apply_status():
+            try:
+                if Path(self.workspace).resolve() != Path(job["workspace"]).resolve():
+                    return
+                record = next(
+                    (
+                        value for value in self.capture_records
+                        if not value.get("deleted")
+                        and str(value.get("record_id") or "").strip() == str(job.get("capture_id") or "").strip()
+                        and str(value.get("result_reanalysis_job_id") or "").strip() == str(job.get("job_id") or "").strip()
+                    ),
+                    None,
+                )
+                if record is not None:
+                    self.set_status(message)
+            except Exception:
+                pass
+
+        try:
+            self.root.after(0, apply_status)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _result_reanalysis_failure(job: dict, result: str) -> str:
+        value = str(result or "").strip()
+        if not value:
+            return "모델이 결과를 반환하지 않았습니다."
+        failure_prefix = "OCR 보정 실패" if job.get("result_type") == "ocr" else "CAP 분석 실패"
+        return value if value.startswith(failure_prefix) else ""
+
+    @staticmethod
+    def _result_reanalysis_error_category(error: str) -> str:
+        value = str(error or "").casefold()
+        if "http 401" in value or "http 403" in value or "인증" in value:
+            return "API 인증 오류"
+        if "http 429" in value or "rate limit" in value:
+            return "요청 한도 초과"
+        if any(f"http {code}" in value for code in (500, 502, 503, 504)):
+            return "모델 서버 일시 오류"
+        if "시간" in value or "timeout" in value:
+            return "응답 시간 초과"
+        if "연결" in value or "connection" in value:
+            return "네트워크 연결 오류"
+        if "이미지" in value or "image" in value:
+            return "원본 이미지 처리 오류"
+        return "예상하지 못한 내부 오류"
+
+    def _records_for_result_reanalysis(self, job: dict):
+        workspace = Path(str(job.get("workspace") or "")).resolve()
+        current_workspace = Path(self.workspace).resolve()
+        if workspace == current_workspace:
+            return self.capture_records, self.paths["records"], True
+
+        records_path = workspace / "state" / "capture_records.json"
+        data = json.loads(records_path.read_text(encoding="utf-8"))
+        records = [record for record in data if isinstance(record, dict)] if isinstance(data, list) else []
+        return records, records_path, False
+
+    def _complete_result_reanalysis(self, job: dict, result: str) -> None:
+        self._ensure_result_reanalysis_state()
+        is_current_workspace = False
+        applied = False
+        failed = True
+        target_record = None
+        target_snapshot = None
+        try:
+            with self.result_reanalysis_lock:
+                records, records_path, is_current_workspace = self._records_for_result_reanalysis(job)
+                target_record = next(
+                    (
+                        record for record in records
+                        if not record.get("deleted")
+                        and str(record.get("record_id") or "").strip() == str(job.get("capture_id") or "").strip()
+                    ),
+                    None,
+                )
+                if target_record is None:
+                    return
+                target_snapshot = dict(target_record)
+
+                error = self._result_reanalysis_failure(job, result)
+                failed = bool(error)
+                if failed:
+                    applied = apply_reanalysis_failure(target_record, job, error)
+                else:
+                    applied = apply_reanalysis_success(target_record, job, result)
+                    if applied and job.get("result_type") == "ocr":
+                        target_record["ocr_correction_model"] = str(
+                            job.get("model") or DEFAULT_CAP_MODEL
+                        )
+                    elif applied:
+                        target_record["cap_model"] = str(
+                            job.get("model") or DEFAULT_CAP_MODEL
+                        )
+                        target_record["cap_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                if not applied:
+                    return
+
+                if is_current_workspace:
+                    self.save_records()
+                else:
+                    write_json_atomic(records_path, records)
+                    document = build_flow_document(records, title=Path(job["workspace"]).name or "수업 흐름")
+                    save_flow_document(
+                        Path(job["workspace"]) / "state" / "flow_document.json",
+                        document,
+                    )
+        except Exception as exc:
+            if is_current_workspace and target_record is not None and target_snapshot is not None:
+                target_record.clear()
+                target_record.update(target_snapshot)
+                target_record["result_reanalysis_status"] = "failed"
+                target_record["result_reanalysis_error"] = f"저장 실패: {type(exc).__name__}"
+                self.refresh_current_preview()
+                self.update_ocr_panel()
+                self.update_result_action_buttons()
+            if is_current_workspace:
+                self.set_status("재분석 결과 저장에 실패하여 기존 결과를 유지합니다.")
+            return
+        finally:
+            with self.result_reanalysis_lock:
+                self.result_reanalysis_jobs.pop(str(job.get("job_id") or ""), None)
+
+        if not is_current_workspace or not applied or target_record is None:
             return
 
-        is_ocr = str(record.get("mode") or "").lower() == "ocr"
-        dialog = tk.Toplevel(self.root)
-        dialog.title("수업 흐름 해석 수정" if is_ocr else "CAP 해석 결과 수정")
-        dialog.geometry("760x560")
-        dialog.minsize(560, 380)
-        dialog.transient(self.root)
-
-        notice = (
-            "모델의 원본 결과는 보존됩니다. 저장한 수정 내용이 화면, 복사 및 수업 흐름에 사용됩니다."
-        )
-        tk.Label(dialog, text=notice, anchor="w", justify="left").pack(
-            fill="x", padx=12, pady=(12, 6)
-        )
-        editor = ScrolledText(dialog, wrap="word", undo=True)
-        editor.pack(fill="both", expand=True, padx=12, pady=(0, 10))
-        editor.insert("1.0", editable_analysis_text(record))
-
-        buttons = tk.Frame(dialog)
-        buttons.pack(fill="x", padx=12, pady=(0, 12))
-
-        def save_and_close():
-            if self.save_record_analysis_edit(record, editor.get("1.0", "end-1c")):
-                dialog.destroy()
-
-        def restore_and_close():
-            if not is_analysis_edited(record):
-                messagebox.showinfo("원본 결과 복원", "현재 저장된 수정 내용이 없습니다.", parent=dialog)
-                return
-            confirmed = messagebox.askyesno(
-                "원본 결과로 복원",
-                "수정한 내용만 제거하고 모델의 원본 해석 결과로 복원합니다.\n이미지와 캡처 기록은 변경되지 않습니다. 계속할까요?",
-                parent=dialog,
+        self.rebuild_outputs_from_records(save_records=False)
+        self.refresh_current_preview()
+        self.update_ocr_panel()
+        self.update_mini_status()
+        self.update_counter()
+        self.update_result_action_buttons()
+        if failed:
+            category = self._result_reanalysis_error_category(
+                str(target_record.get("result_reanalysis_error") or "")
             )
-            if confirmed and self.restore_record_analysis_edit(record):
-                dialog.destroy()
+            self.set_status(f"재분석에 실패하여 기존 결과를 유지합니다. ({category})")
+        else:
+            self.set_status("다시 분석한 결과로 수정되었습니다.")
+            if job.get("result_type") == "ocr":
+                target_record.pop("flow_interpretation_needs_refresh", None)
+                if not self.start_flow_interpretation_background(target_record, force=True):
+                    target_record["flow_interpretation_needs_refresh"] = True
+                    self.save_records()
 
-        tk.Button(buttons, text="저장", width=12, command=save_and_close).pack(side="right")
-        tk.Button(buttons, text="취소", width=12, command=dialog.destroy).pack(
-            side="right", padx=(0, 8)
-        )
-        tk.Button(buttons, text="원본으로 복원", width=14, command=restore_and_close).pack(side="left")
-        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
-        dialog.grab_set()
-        editor.focus_set()
+        try:
+            append_event(
+                Path(job["workspace"]) / "logs" / "events.jsonl",
+                {
+                    "type": "result_reanalysis_done",
+                    "capture_id": job.get("capture_id"),
+                    "result_type": job.get("result_type"),
+                    "request_version": job.get("request_version"),
+                    "failed": failed,
+                },
+            )
+        except Exception:
+            pass
 
     def copy_current_cap_result(self):
         record = self.get_current_record()
@@ -1302,6 +1540,9 @@ class ClassFlowAIApp:
         self.run_ocr_correction_for_record_async(record, auto_copy=True)
 
     def run_ocr_correction_for_record_async(self, record: dict, auto_copy: bool = True) -> bool:
+        if str(record.get("result_reanalysis_status") or "").lower() == "running":
+            self.set_status("결과 재분석이 끝난 뒤 OCR 정확한 복사를 다시 시도해 주세요.")
+            return False
         if str(record.get("status") or "") == "ocr_correction_running":
             self.set_status("OCR 정확도 보정이 이미 진행 중입니다.")
             return False
@@ -1508,6 +1749,7 @@ class ClassFlowAIApp:
         self.workspace_var.set(self.lesson_location_text())
         self.refresh_current_preview()
         self.update_mode_badge()
+        self.root.after(0, self._resume_pending_flow_after_reanalysis)
         return True
 
     def start_new_lesson(self):
@@ -1606,9 +1848,50 @@ class ClassFlowAIApp:
                 self.capture_records = [record for record in self.capture_records if isinstance(record, dict)]
             except Exception:
                 self.capture_records = []
+        recovered_reanalysis = False
+        for record in self.capture_records:
+            if str(record.get("result_reanalysis_status") or "").lower() == "running":
+                record["result_reanalysis_status"] = "failed"
+                record["result_reanalysis_error"] = "프로그램이 종료되어 재분석이 완료되지 않았습니다."
+                recovered_reanalysis = True
         normalize_display_orders(self.capture_records)
+        if recovered_reanalysis and self.paths.get("records"):
+            write_json_atomic(self.paths["records"], self.capture_records)
         active = self.active_record_indices()
         self.current_record_index = active[-1] if active else -1
+
+    def _resume_pending_flow_after_reanalysis(self) -> None:
+        for record in list(self.capture_records):
+            if record.get("deleted") or not record.get("flow_interpretation_needs_refresh"):
+                continue
+            record.pop("flow_interpretation_needs_refresh", None)
+            if not self.start_flow_interpretation_background(record, force=True):
+                record["flow_interpretation_needs_refresh"] = True
+            else:
+                self.save_records()
+
+    @staticmethod
+    def _defer_flow_interpretation_for_workspace(workspace: Path, record_id: str) -> bool:
+        try:
+            records_path = Path(workspace).resolve() / "state" / "capture_records.json"
+            data = json.loads(records_path.read_text(encoding="utf-8"))
+            records = [record for record in data if isinstance(record, dict)] if isinstance(data, list) else []
+            record = next(
+                (
+                    value for value in records
+                    if not value.get("deleted")
+                    and str(value.get("record_id") or "").strip() == str(record_id or "").strip()
+                ),
+                None,
+            )
+            if record is None:
+                return False
+            record.pop("flow_interpretation_status", None)
+            record["flow_interpretation_needs_refresh"] = True
+            write_json_atomic(records_path, records)
+            return True
+        except Exception:
+            return False
 
     def save_records(self):
         records_path = self.paths.get("records")
@@ -2234,6 +2517,9 @@ class ClassFlowAIApp:
         self.run_ocr_for_record_async(record, auto_copy=True, force=True)
 
     def run_ocr_for_record_async(self, record: dict, auto_copy: bool = True, force: bool = False):
+        if str(record.get("result_reanalysis_status") or "").lower() == "running":
+            self.set_status("결과 재분석이 끝난 뒤 OCR을 다시 실행해 주세요.")
+            return
         image_path = Path(str(record.get("image_path") or ""))
         if not image_path.exists():
             messagebox.showwarning("OCR 실행 불가", f"이미지 파일을 찾을 수 없습니다.\n\n{image_path}")
@@ -2467,6 +2753,7 @@ class ClassFlowAIApp:
             pending_key = job["pending_key"]
             try:
                 if Path(self.workspace).resolve() != Path(workspace_at_start).resolve():
+                    self._defer_flow_interpretation_for_workspace(workspace_at_start, record_id)
                     with self.flow_interpretation_lock:
                         self.flow_interpretation_pending.discard(pending_key)
                     continue
@@ -2571,12 +2858,17 @@ class ClassFlowAIApp:
             self.flow_interpretation_pending.discard(key)
         # 수업을 바꾸거나 캡처를 삭제한 동안 끝난 오래된 작업은 현재 수업에 섞지 않는다.
         if Path(self.workspace).resolve() != Path(workspace_at_start).resolve():
+            self._defer_flow_interpretation_for_workspace(
+                workspace_at_start,
+                str(record.get("record_id") or "").strip(),
+            )
             return
         if not any(value is record for value in self.capture_records):
             return
 
         if record.pop("flow_interpretation_requeue", False):
             record.pop("flow_interpretation_status", None)
+            record.pop("flow_interpretation_needs_refresh", None)
             self.save_records()
             self.rebuild_outputs_from_records(save_records=False)
             self.start_flow_interpretation_background(record, force=True)
@@ -2622,6 +2914,7 @@ class ClassFlowAIApp:
             ):
                 record.pop(key, None)
             record["flow_interpretation_status"] = "done"
+            record.pop("flow_interpretation_needs_refresh", None)
             record["flow_title"] = str(parsed["title"]).strip()
             record["flow_interpretation_text"] = body
             record["ocr_interpretation_text"] = body
@@ -2658,6 +2951,9 @@ class ClassFlowAIApp:
 
 
     def run_cap_reasoning_for_record_async(self, record: dict, auto_copy: bool = False, force: bool = False):
+        if str(record.get("result_reanalysis_status") or "").lower() == "running":
+            self.set_status("결과 재분석이 끝난 뒤 CAP 분석을 다시 실행해 주세요.")
+            return
         image_path = Path(str(record.get("image_path") or ""))
         if not image_path.exists():
             messagebox.showwarning("CAP 실행 불가", f"이미지 파일을 찾을 수 없습니다.\n\n{image_path}")
